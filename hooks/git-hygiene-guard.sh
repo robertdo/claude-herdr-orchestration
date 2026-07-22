@@ -1,9 +1,23 @@
 #!/bin/bash
 # git-hygiene-guard.sh — PreToolUse hook (Bash matcher).
-# Enforces the git hygiene playbook (~/.claude/docs/git-hygiene-playbook.md):
-# main is merge-only. Blocks `git commit` when the target repo is on main/master,
-# EXCEPT when a squash-merge/merge is in progress (landing) or the repo has no
-# commits yet (bootstrapping a new repo).
+#
+# BEST-EFFORT LINTER, NOT ENFORCEMENT. This hook pattern-matches the literal
+# `Bash` tool command string and denies `git commit` when the target repo is
+# on main/master (except an empty repo's first commit). That catches the
+# common ACCIDENTAL slip — a plain `git commit` on main — before it runs,
+# with a message pointing at the sanctioned path (bin/land.sh).
+#
+# It is not, and must not be read as, an enforcement boundary: the input is
+# Turing-complete shell, so "does this string eventually move
+# refs/heads/main" is undecidable in general. Interpreter indirection
+# (`sh -c "..."`), quoting (`"git" commit`, `\git commit`), non-`commit`
+# porcelain and plumbing that also move the branch (`merge`, `pull`,
+# `cherry-pick`, `commit-tree` + `update-ref`, `branch -f`), a non-leading
+# `cd`, `GIT_DIR=` retargeting, and detached HEAD all defeat it — verified,
+# not hypothetical. Do not add cases chasing that list; each one raises
+# false-positive risk without making the predicate decidable. For structural,
+# spelling- and tool-immune enforcement, see the git-level hook at
+# hooks/git-repo/reference-transaction (opt-in per repo — install-repo.sh).
 
 input=$(cat)
 cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
@@ -16,11 +30,29 @@ cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
 # so an unquoted `git ... commit` (incl. `git -C <path> commit`) still matches,
 # while quoted occurrences do not. Target extraction below still uses the raw
 # $cmd so real `-C <path>` / `cd <dir>` targets are read correctly.
-scan=$(printf '%s' "$cmd" | sed -E 's/"[^"]*"/Q/g')
-scan=$(printf '%s' "$scan" | sed -E "s/'[^']*'/Q/g")
+#
+# sed applies each `s///` per LINE, so a quoted argument that itself spans
+# multiple lines (a multi-line -m message, for instance) never got replaced
+# by a plain `sed 's/"[^"]*"/.../'` pass: the opening quote's line has no
+# closing quote on it, and vice versa, so the text between them — which can
+# contain the literal words "git commit" — survived unmasked and could trip
+# the grep below on prose that never invokes git at all. Fold real newlines
+# into a placeholder byte first so the whole command is one sed "line" (and
+# unfold after), rather than trying to make sed itself multi-line-aware: the
+# textbook `N;$!ba` slurp idiom is a trap here — on BSD/macOS sed, `N` at
+# end-of-input with nothing left to append drops pattern space instead of
+# auto-printing it (GNU sed prints either way), so that idiom silently empties
+# the *common* single-line case instead of the multi-line one it was meant to
+# fix.
+scan=$(printf '%s' "$cmd" | tr '\n' '\001' | sed -E 's/"[^"]*"/Q/g' | tr '\001' '\n')
+scan=$(printf '%s' "$scan" | tr '\n' '\001' | sed -E "s/'[^']*'/Q/g" | tr '\001' '\n')
 
-# Only inspect commands that actually invoke `git ... commit`.
-if ! printf '%s' "$scan" | grep -Eq '(^|[;&|[:space:]()])git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)?(-[^[:space:]]+[[:space:]]+)*commit([[:space:]]|$)'; then
+# Only inspect commands that actually invoke `git ... commit`. The optional
+# `-c key=value` alternative handles that flag specifically (it takes its
+# value as a separate token, unlike other single-token flags) since agents
+# pass it routinely (e.g. `-c user.email=...`) and it would otherwise slip
+# past the generic flag-token pattern below.
+if ! printf '%s' "$scan" | grep -Eq '(^|[;&|[:space:]()])git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)?((-c[[:space:]]+[^[:space:]]+|-[^[:space:]]+)[[:space:]]+)*commit([[:space:]]|$)'; then
   exit 0
 fi
 
@@ -50,15 +82,10 @@ JSON
   fi
   exit 0
 fi
-# Landing: `git merge --squash` writes SQUASH_MSG. Deliberately NOT excepting
-# MERGE_HEAD/MERGE_MSG — a plain merge commit on main is not the squash-only flow.
-if [ -f "$gitdir/SQUASH_MSG" ]; then
-  exit 0
-fi
 # Bootstrapping: repo with no commits yet.
 git -C "$dir" rev-parse -q --verify HEAD >/dev/null 2>&1 || exit 0
 
 cat <<'JSON'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Git hygiene playbook: main is merge-only — direct commits on main are blocked. Create a worktree first (herdr worktree create --cwd <repo> --branch feat/<slug>), commit there, then land with `git merge --squash <branch>` + `git commit` (squash-merge commits ARE allowed by this hook). Playbook: ~/.claude/docs/git-hygiene-playbook.md"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Git hygiene playbook: main is merge-only — direct commits on main are blocked, with no exception for a manual `git merge --squash` + `git commit` (this hook cannot tell that apart from an accidental direct commit, and the blessed path no longer produces one). Create a worktree first (herdr worktree create --cwd <repo> --branch feat/<slug>), commit there, then land with bin/land.sh <branch>. Playbook: ~/.claude/docs/git-hygiene-playbook.md"}}
 JSON
 exit 0

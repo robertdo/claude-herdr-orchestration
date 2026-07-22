@@ -706,6 +706,53 @@ check "  and the hook fires from there" "$(denied "$(grun "$repo" update-ref ref
 
 check "a non-repository target is refused" "$([ "$(inst "$ROOT")" -ne 0 ] && echo refused || echo accepted)" "refused"
 
+# ---------------------------------------------------------------------------
+# hooks/git-hygiene-guard.sh — the Bash PreToolUse commit linter (the OTHER
+# guard: a Claude Code hook, not a git hook). It reads a JSON payload on
+# stdin ({cwd, tool_input:{command}}) and emits either nothing (allow) or a
+# JSON deny decision on stdout, so it's directly testable without going
+# through Claude Code, bin/land.sh, or a real PreToolUse dispatch at all.
+# ---------------------------------------------------------------------------
+
+GUARD="$REPO_ROOT/hooks/git-hygiene-guard.sh"
+
+# guard_run — feed the guard a {cwd, command} payload, echo whatever it wrote
+# to stdout (empty string == allow; a JSON blob == deny).
+guard_run() {
+  local cwd="$1" cmd="$2"
+  jq -n --arg cwd "$cwd" --arg cmd "$cmd" '{cwd:$cwd, tool_input:{command:$cmd}}' | bash "$GUARD"
+}
+guard_verdict() { [ -n "$(guard_run "$1" "$2")" ] && echo denied || echo allowed; }
+
+echo "== 25. hooks/git-hygiene-guard.sh (Bash PreToolUse commit linter) =="
+
+repo=$(mkrepo); wt=$(wtof "$repo")
+
+out=$(guard_run "$repo" 'git commit -m x')
+check "a direct commit on the protected branch is denied" "$([ -n "$out" ] && echo denied || echo allowed)" "denied"
+check "  the denial names bin/land.sh" "$(printf '%s' "$out" | grep -c 'bin/land.sh')" "1"
+
+touch "$repo/.git/SQUASH_MSG"
+check "the SQUASH_MSG two-step no longer authorises a commit" "$(guard_verdict "$repo" 'git commit -m x')" "denied"
+rm -f "$repo/.git/SQUASH_MSG"
+
+cmd='bash /path/to/land-runner.sh some/branch -m "prose that mentions
+git commit and git merge --abort
+in the body"'
+check "a quoted argument that merely mentions a git operation is not denied (fix #2 regression)" \
+  "$(guard_verdict "$repo" "$cmd")" "allowed"
+
+check "git -c key=value commit on the protected branch is denied (fix #3)" \
+  "$(guard_verdict "$repo" 'git -c user.email=x@y commit -m x')" "denied"
+
+check "a commit on a branch inside a linked worktree is not denied" \
+  "$(guard_verdict "$wt" 'git commit -m x')" "allowed"
+
+bare=$(mktemp -d "$ROOT/b.XXXXXX")
+git init -q -b main "$bare" >>"$SETUPLOG" 2>&1
+check "the empty-repo bootstrap exception still works" \
+  "$(guard_verdict "$bare" 'git commit -m init')" "allowed"
+
 echo
 echo "=============================================="
 if [ "$failn" -eq 0 ]; then
