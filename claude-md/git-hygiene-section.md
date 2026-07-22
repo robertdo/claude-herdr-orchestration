@@ -1,0 +1,30 @@
+<!--
+Paste this whole section into your ~/.claude/CLAUDE.md (global) or a project CLAUDE.md.
+It is the "soft" layer: the doctrine the model reads every session. The hooks are the
+"hard" layer that enforces it. install.sh appends this for you (marker-guarded) — you
+only need to do this by hand if you install manually.
+
+`~/src` below is just where the author keeps repos; nothing hardcodes it. Adjust the
+heading to wherever your repos live.
+-->
+
+# Git hygiene (all repos under ~/src)
+
+Full playbook: `~/.claude/docs/git-hygiene-playbook.md`. The rules, uniform for every repo:
+
+1. **Always worktree.** Every change — feature, fix, typo — happens on a branch in a herdr worktree, never in the main checkout. Hooks enforce this physically: file edits in a primary checkout are blocked (any branch — `git checkout -b` there is not the worktree flow), commits on main are blocked except squash-merge landings, and branch commits in a primary checkout are blocked. When a hook denies you, create a worktree and dispatch per rule 2 — do not look for workarounds. (Bootstrapping a brand-new repo is the one exception the hooks allow — the first commit on a repo with no commits yet is fine.)
+2. **Orchestrate, don't implement.** A session in a repo's main checkout that receives code work is the ORCHESTRATOR: it launches a Claude agent inside the worktree workspace and supervises — it does NOT edit files itself, not even at the worktree's path. With `HERDR_ENV=1`:
+   ```bash
+   herdr worktree create --cwd <repo> --branch <feat|fix|chore>/<slug> --no-focus --json
+   # parse .result.root_pane.pane_id
+   herdr pane run <pane> "claude"          # or claude --model <m> — size by task, see below
+   herdr wait agent-status <pane> --status idle --timeout 30000
+   herdr pane run <pane> "<full self-contained task prompt>"
+   ```
+   **Size the worker (model + effort) to the task's hardest requirement** — dispatch the cheapest model that clears it, reserve your top-tier model for the genuinely hard tail, and pass `--model`/`--effort` explicitly (your harness default is not the right dispatch default). Add your own model-routing policy here if you have one. If a worker grinds without progress, kill it and relaunch on a stronger combo — workers don't self-escalate. The dispatched model is the worker's *ceiling*, not what it uses for everything: it keeps planning/design/judgment on its own model and pushes routine subtasks to cheaper subagents.
+   **Feature lifecycle — one worktree, one worker, one landing.** The orchestrator's pre-dispatch role is SCOPING ONLY: ask the user whatever clarifying questions you need to pin down the goal, constraints, and blast radius — asking is expected, not a delay, since a well-scoped brief is what makes dispatch smart — then use the answers to size the model/effort dials and write a complete self-contained brief, and dispatch ONE worker. Clarify only enough to dispatch well; the design itself still happens in the worker's pane, not here. The worker owns the full lifecycle in its worktree — brainstorming/design (the user interacts with it directly in its pane when design input is needed; `blocked` status signals this), spec (first commit), plan, implementation, tests — landed in a single squash. The orchestrator does not brainstorm designs, author specs or plans, or dispatch workers just to commit documents; it scopes, dispatches, supervises, and lands. In a main checkout, "let's brainstorm/design/build/implement X" is a DISPATCH trigger, NOT an inline-work trigger — do not invoke brainstorming/spec/plan skills inline; create the worktree and let the worker invoke them in its pane (a `UserPromptSubmit` hook nudges this).
+   Then confirm the worker started (`herdr wait agent-status <pane> --status working --timeout 30000`) and supervise WITHOUT blocking: run `bash ~/.claude/bin/herdr-watch-agent.sh <pane>` as a background Bash task (`run_in_background: true`) and END THE TURN — never foreground-wait on a worker. This keeps the orchestrator free to talk to the user and dispatch more worktree workers in parallel (one watcher per pane). The watcher wakes the session when it exits: `done`/`idle` → review with `herdr pane read <pane> --source recent-unwrapped --lines 120`, then the orchestrator runs `/land` (never the worktree agent — landing removes its workspace); `blocked` → read the question, answer via `pane run`, restart the watcher; `gone` → pane closed, investigate. Without herdr, fall back to doing the work yourself in a plain `git worktree add` checkout.
+3. **Land via squash.** To land: rebase on main → run tests (or build/lint if no suite) → review the diff → `git merge --squash <branch>` + `git commit` on main. One clean commit per change.
+4. **Clean up immediately after landing:** `herdr worktree remove --workspace <id> --force` then `git branch -D <branch>`.
+5. **Deploy is separate.** Merging makes main deployable; never auto-deploy after a merge — deploy only when explicitly asked.
+6. Non-git directories are exempt.

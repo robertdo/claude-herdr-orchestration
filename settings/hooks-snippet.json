@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/git-hygiene-guard.sh",
+            "timeout": 10,
+            "statusMessage": "git hygiene check"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/git-hygiene-edit-guard.sh",
+            "timeout": 10,
+            "statusMessage": "git hygiene edit check"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/git-hygiene-dispatch-nudge.sh",
+            "timeout": 10,
+            "statusMessage": "git hygiene dispatch check"
+          }
+        ]
+      }
+    ]
+  }
+}
