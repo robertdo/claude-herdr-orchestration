@@ -33,11 +33,46 @@ The commit guard decides by pattern-matching the literal `Bash` command string �
 - **`/land` skill**, backed by `bin/land.sh` — the landing sequence: rebase onto main automatically → run tests (auto-detected, or `--check`/`--no-tests`) → build the landing commit as an object (`git commit-tree`, off the branch's own tree — main's index and working tree are never touched) → print the diff → fast-forward main onto it (`git merge --ff-only`) → clean up. Review is retrospective in the default run (the merge happens in the same invocation that prints the diff); `--dry-run` is the actual gate. Refuses a dirty branch worktree, tracked changes on main, or landing with no verification found (unless `--no-tests` says the omission is deliberate).
 - **`herdr-watch-agent.sh`** — lets an orchestrator background-watch a dispatched worker and get woken when it finishes/blocks, instead of foreground-waiting.
 
+### The landing sequence
+
+The refusals are most of `bin/land.sh`'s value — it would rather stop than land something unverified or land onto the wrong branch:
+
+```mermaid
+flowchart TD
+    A["bin/land.sh branch"] --> B{"Run from the primary checkout?"}
+    B -->|No| R1["Refuse: not the primary checkout"]
+    B -->|Yes| C{"Primary checkout on main or master?"}
+    C -->|No| R2["Refuse: wrong branch checked out"]
+    C -->|Yes| D{"Branch exists, with its own worktree?"}
+    D -->|No| R3["Refuse: no such branch or worktree"]
+    D -->|Yes| E{"Branch worktree clean, and main has no tracked changes?"}
+    E -->|No| R4["Refuse: dirty worktree or dirty main"]
+    E -->|Yes| F{"Branch already contains main?"}
+    F -->|No| G["Rebase branch onto main, in its own worktree"]
+    G --> H{"Rebase conflict?"}
+    H -->|Yes| R5["Refuse: rebase left in progress, resolve and re-run"]
+    H -->|No| I{"Verification command found, or --no-tests given?"}
+    F -->|Yes| I
+    I -->|No| R6["Refuse: no test suite found and no --check given"]
+    I -->|Yes| J["Run the check command in the worktree"]
+    J --> K{"New commits landed on the branch meanwhile?"}
+    K -->|Yes| R7["Refuse: new commits are unverified, re-run"]
+    K -->|No| L["Build the candidate: git commit-tree, branch's tree with main's tip as parent"]
+    L --> M["Print the diff"]
+    M --> N{"--dry-run?"}
+    N -->|Yes| O["Stop: candidate printed, main untouched"]
+    N -->|No| P{"git merge --ff-only onto main succeeds?"}
+    P -->|No| R8["Refuse: main moved concurrently, nothing landed"]
+    P -->|Yes| Q["Clean up: remove the worktree, delete the branch"]
+```
+
 ## What this does and does not enforce
 
 **Does:** catch, before execution, the two most common ways a long session drifts — a direct `git commit` on `main`/`master`, and a direct edit to the primary checkout — with a clear error message and zero cost to the normal workflow.
 
 **Does not:** stop a command or edit aimed around it. The commit guard is a text pattern-match over an unbounded input language (Turing-complete shell), so it has verified bypasses (interpreter indirection, non-`commit` porcelain/plumbing, `GIT_DIR` retargeting, detached HEAD, and deliberately no exception for a manual squash-merge). The edit guard is sound in approach but narrow in scope (only three tools, containing-directory classification, textual `cwd` comparison). Neither closes the tool surface — any MCP server or script that writes files or shells out bypasses both — and both can be disarmed by an edit to `~/.claude/**`, which is exempt. Neither touches your own terminal (see [Caveats](#caveats)).
+
+Four layers, each a different reach — not a hierarchy where one supersedes the last, but a spectrum of what a bypass has to do to get around it. In increasing order of what it takes to defeat them: the **Bash linter** is pre-execution and defeated by command spelling; the **edit guard** is sound within `Edit`/`Write`/`NotebookEdit` and blind to every other write path; the **`reference-transaction` git hook** is spelling- and tool-immune but enforces linearity rather than provenance, and is opt-in per repo; **remote branch protection** is the only real privilege boundary, and is not implemented here.
 
 The full bypass-by-bypass breakdown, the deliberate asymmetry between this guard and the per-repository one below, and the remote-branch-protection option that *is* an actual privilege boundary all live in the playbook's ["What this does and does not enforce"](docs/git-hygiene-playbook.md#what-this-does-and-does-not-enforce) — this section is the summary, that one is the reference.
 
@@ -87,6 +122,17 @@ The escape hatch is documented on purpose. You will legitimately need it — to 
 > This repository does **not** install the guard into itself. A wrong version of it here would reject the very landings needed to fix it, so turning it on is a deliberate decision, and `run-tests.sh` asserts it is off.
 
 ## The orchestrator / worker model
+
+Routing is keyed on **discovery and volume, never diff size** — a one-line fix and a security patch can both be Tier 1 if the acting session already knows the exact change:
+
+```mermaid
+flowchart TD
+    A["Every change, even a typo, starts in a worktree on a branch"] --> B{"Already know the exact change to make?"}
+    B -->|Yes| C["Tier 1: self-edit in the worktree (EnterWorktree, edit, commit, ExitWorktree, then land)"]
+    B -->|No| D{"Needs discovery, volume, or repetition, at modest blast radius?"}
+    D -->|Yes| E["Tier 2: subagent with isolation set to worktree"]
+    D -->|No| F["Tier 3: dispatch a herdr worker - orchestrator scopes, supervises, and lands, but never implements"]
+```
 
 The session sitting in a repo's **main checkout is the orchestrator**: it scopes the work, dispatches a worker into its own worktree, supervises without blocking, and lands when the worker is done. It never implements. The **worker** owns the entire lifecycle in its one worktree — design, spec, plan, implementation, tests — landed in a single squash. One worktree, one worker, one landing.
 
