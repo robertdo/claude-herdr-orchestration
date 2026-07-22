@@ -13,7 +13,7 @@
 # What it does:
 #   • copies hooks/, bin/, docs/, skills/land/ into <claude-dir>/
 #   • merges the three hooks into <claude-dir>/settings.json  (backup first)
-#   • appends the git-hygiene section to <claude-dir>/CLAUDE.md (backup first)
+#   • installs/replaces the git-hygiene section in <claude-dir>/CLAUDE.md (backup first)
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,10 +50,11 @@ cp "$REPO_DIR"/hooks/git-hygiene-guard.sh          "$CLAUDE_DIR/hooks/"
 cp "$REPO_DIR"/hooks/git-hygiene-edit-guard.sh     "$CLAUDE_DIR/hooks/"
 cp "$REPO_DIR"/hooks/git-hygiene-dispatch-nudge.sh "$CLAUDE_DIR/hooks/"
 cp "$REPO_DIR"/bin/herdr-watch-agent.sh            "$CLAUDE_DIR/bin/"
+cp "$REPO_DIR"/bin/land.sh                         "$CLAUDE_DIR/bin/"
 cp "$REPO_DIR"/docs/git-hygiene-playbook.md        "$CLAUDE_DIR/docs/"
 cp "$REPO_DIR"/skills/land/SKILL.md                "$CLAUDE_DIR/skills/land/"
-chmod +x "$CLAUDE_DIR"/hooks/git-hygiene-*.sh "$CLAUDE_DIR"/bin/herdr-watch-agent.sh
-say "copied hooks, watcher, playbook, and /land skill"
+chmod +x "$CLAUDE_DIR"/hooks/git-hygiene-*.sh "$CLAUDE_DIR"/bin/herdr-watch-agent.sh "$CLAUDE_DIR"/bin/land.sh
+say "copied hooks, watcher, land script, playbook, and /land skill"
 
 # ---- merge hooks into settings.json ----------------------------------------
 SETTINGS="$CLAUDE_DIR/settings.json"
@@ -70,34 +71,125 @@ NUDGE="bash $CLAUDE_DIR/hooks/git-hygiene-dispatch-nudge.sh"
 
 jq \
   --arg guard "$GUARD" --arg edit "$EDIT" --arg nudge "$NUDGE" '
-  def cmds: [(.hooks // {}) | .. | objects | select(has("command")) | .command];
-  def present($sub): (cmds | any(contains($sub)));
+  # identity = an entry whose hooks[] contains a command mentioning this script;
+  # such an entry is replaced wholesale (fixes wrong matcher/path/timeout/wrapper)
+  # rather than treated as "already done" — a matching filename is not enough.
+  def upsert($arr; $sub; $entry):
+    ($arr | map(.hooks // [] | any(.command? // "" | contains($sub))) | index(true)) as $idx
+    | if $idx == null then $arr + [$entry] else $arr | .[$idx] = $entry end;
   .hooks = (.hooks // {})
   | .hooks.PreToolUse = (.hooks.PreToolUse // [])
   | .hooks.UserPromptSubmit = (.hooks.UserPromptSubmit // [])
-  | (if present("git-hygiene-guard.sh") then .
-     else .hooks.PreToolUse += [{matcher:"Bash",hooks:[{type:"command",command:$guard,timeout:10,statusMessage:"git hygiene check"}]}] end)
-  | (if present("git-hygiene-edit-guard.sh") then .
-     else .hooks.PreToolUse += [{matcher:"Edit|Write|NotebookEdit",hooks:[{type:"command",command:$edit,timeout:10,statusMessage:"git hygiene edit check"}]}] end)
-  | (if present("git-hygiene-dispatch-nudge.sh") then .
-     else .hooks.UserPromptSubmit += [{hooks:[{type:"command",command:$nudge,timeout:10,statusMessage:"git hygiene dispatch check"}]}] end)
+  | .hooks.PreToolUse = upsert(.hooks.PreToolUse; "git-hygiene-guard.sh";
+      {matcher:"Bash",hooks:[{type:"command",command:$guard,timeout:10,statusMessage:"git hygiene check"}]})
+  | .hooks.PreToolUse = upsert(.hooks.PreToolUse; "git-hygiene-edit-guard.sh";
+      {matcher:"Edit|Write|NotebookEdit",hooks:[{type:"command",command:$edit,timeout:10,statusMessage:"git hygiene edit check"}]})
+  | .hooks.UserPromptSubmit = upsert(.hooks.UserPromptSubmit; "git-hygiene-dispatch-nudge.sh";
+      {hooks:[{type:"command",command:$nudge,timeout:10,statusMessage:"git hygiene dispatch check"}]})
 ' "$SETTINGS.bak-$TS" > "$SETTINGS"
 say "merged 3 hooks into settings.json (backup: settings.json.bak-$TS)"
 
-# ---- append CLAUDE.md section ----------------------------------------------
+# ---- install/replace CLAUDE.md section -------------------------------------
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 SECTION="$REPO_DIR/claude-md/git-hygiene-section.md"
 BEGIN="<!-- BEGIN claude-herdr-hygiene -->"
 END="<!-- END claude-herdr-hygiene -->"
-if [ -f "$CLAUDE_MD" ] && grep -qF "$BEGIN" "$CLAUDE_MD"; then
-  say "CLAUDE.md already has the git-hygiene section — skipped"
-else
+
+# Lines outside the exact BEGIN/END markers (used both to detect corruption
+# and, after a rewrite, to prove nothing outside the block moved).
+claude_md_outside() {
+  awk -v begin="$BEGIN" -v end="$END" '
+    $0 == begin { inblock = 1; next }
+    $0 == end   { inblock = 0; next }
+    !inblock    { print }
+  ' "$1"
+}
+claude_md_inside() {
+  awk -v begin="$BEGIN" -v end="$END" '
+    $0 == begin { inblock = 1; next }
+    $0 == end   { inblock = 0; next }
+    inblock     { print }
+  ' "$1"
+}
+
+begin_count=0
+end_count=0
+if [ -f "$CLAUDE_MD" ]; then
+  begin_count=$(grep -Fc "$BEGIN" "$CLAUDE_MD" || true)
+  end_count=$(grep -Fc "$END" "$CLAUDE_MD" || true)
+fi
+
+if [ "$begin_count" -eq 0 ] && [ "$end_count" -eq 0 ]; then
+  # No trace of the section at all — safe to append fresh.
   [ -f "$CLAUDE_MD" ] && cp "$CLAUDE_MD" "$CLAUDE_MD.bak-$TS"
   { printf '\n%s\n' "$BEGIN"; cat "$SECTION"; printf '%s\n' "$END"; } >> "$CLAUDE_MD"
   if [ -f "$CLAUDE_MD.bak-$TS" ]; then
     say "appended git-hygiene section to CLAUDE.md (backup: CLAUDE.md.bak-$TS)"
   else
     say "created CLAUDE.md with the git-hygiene section"
+  fi
+else
+  # Something marker-like exists. Detection and replacement must use the
+  # identical rule (an exact whole-line match) so they can never disagree —
+  # validate strictly, on the untouched file, before writing anything.
+  problem=""
+  if [ "$begin_count" -ne 1 ]; then
+    problem="found $begin_count line(s) containing the BEGIN marker text (need exactly 1)"
+  elif [ "$end_count" -ne 1 ]; then
+    problem="found $end_count line(s) containing the END marker text (need exactly 1)"
+  elif ! grep -Fxq "$BEGIN" "$CLAUDE_MD"; then
+    problem="the BEGIN marker line doesn't match exactly (trailing whitespace or extra text) — expected exactly: $BEGIN"
+  elif ! grep -Fxq "$END" "$CLAUDE_MD"; then
+    problem="the END marker line doesn't match exactly (trailing whitespace or extra text) — expected exactly: $END"
+  else
+    begin_line=$(grep -Fxn "$BEGIN" "$CLAUDE_MD" | awk -F: 'NR==1{print $1}')
+    end_line=$(grep -Fxn "$END" "$CLAUDE_MD" | awk -F: 'NR==1{print $1}')
+    if [ "$end_line" -le "$begin_line" ]; then
+      problem="the END marker (line $end_line) does not appear after the BEGIN marker (line $begin_line)"
+    fi
+  fi
+
+  if [ -n "$problem" ]; then
+    printf '  ✗ CLAUDE.md has git-hygiene markers install.sh cannot safely replace:\n' >&2
+    printf '      %s\n' "$problem" >&2
+    printf '    Fix or remove the markers in %s by hand, then re-run. File left untouched.\n' "$CLAUDE_MD" >&2
+    exit 1
+  fi
+
+  cp "$CLAUDE_MD" "$CLAUDE_MD.bak-$TS"
+  WORK="$(mktemp -d)"
+  awk -v begin="$BEGIN" -v end="$END" -v section="$SECTION" '
+    $0 == begin { print; while ((getline line < section) > 0) print line; close(section); skipping = 1; next }
+    $0 == end   { print; skipping = 0; next }
+    skipping    { next }
+    { print }
+  ' "$CLAUDE_MD.bak-$TS" > "$WORK/new-CLAUDE.md"
+
+  # Verify the outcome rather than assume it: exactly one BEGIN/END, the
+  # block between them equals the current section, everything else unchanged.
+  verify_ok=1
+  new_begin=$(grep -Fxc "$BEGIN" "$WORK/new-CLAUDE.md" || true)
+  new_end=$(grep -Fxc "$END" "$WORK/new-CLAUDE.md" || true)
+  { [ "$new_begin" -eq 1 ] && [ "$new_end" -eq 1 ]; } || verify_ok=0
+  if [ "$verify_ok" -eq 1 ]; then
+    claude_md_inside "$WORK/new-CLAUDE.md" > "$WORK/inside-new"
+    diff -q "$WORK/inside-new" "$SECTION" >/dev/null 2>&1 || verify_ok=0
+  fi
+  if [ "$verify_ok" -eq 1 ]; then
+    claude_md_outside "$CLAUDE_MD.bak-$TS" > "$WORK/outside-before"
+    claude_md_outside "$WORK/new-CLAUDE.md" > "$WORK/outside-after"
+    diff -q "$WORK/outside-before" "$WORK/outside-after" >/dev/null 2>&1 || verify_ok=0
+  fi
+
+  if [ "$verify_ok" -eq 1 ]; then
+    cp "$WORK/new-CLAUDE.md" "$CLAUDE_MD"
+    rm -rf "$WORK"
+    say "replaced git-hygiene section in CLAUDE.md (backup: CLAUDE.md.bak-$TS)"
+  else
+    cp "$CLAUDE_MD.bak-$TS" "$CLAUDE_MD"
+    rm -rf "$WORK"
+    printf '  ✗ post-write verification failed rewriting CLAUDE.md — restored from backup (%s). This indicates a bug in install.sh; please report it.\n' "$CLAUDE_MD.bak-$TS" >&2
+    exit 1
   fi
 fi
 

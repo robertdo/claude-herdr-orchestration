@@ -75,10 +75,11 @@ Install into a non-default location with `./install.sh /path/to/.claude` (or `CL
 |---|---|
 | `hooks/*.sh` | `~/.claude/hooks/` |
 | `bin/herdr-watch-agent.sh` | `~/.claude/bin/` |
+| `bin/land.sh` | `~/.claude/bin/` |
 | `docs/git-hygiene-playbook.md` | `~/.claude/docs/` |
 | `skills/land/SKILL.md` | `~/.claude/skills/land/` |
 | `settings/hooks-snippet.json` | merged into `~/.claude/settings.json` |
-| `claude-md/git-hygiene-section.md` | appended to `~/.claude/CLAUDE.md` |
+| `claude-md/git-hygiene-section.md` | merged into `~/.claude/CLAUDE.md` (block replaced on re-run) |
 
 ## Manual install
 
