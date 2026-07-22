@@ -1,8 +1,8 @@
 # claude-herdr-hygiene
 
-**Worktree-per-change git hygiene for [Claude Code](https://claude.com/claude-code), enforced by hooks and orchestrated with [herdr](https://herdr.dev/) worktrees.**
+**Worktree-per-change git hygiene for [Claude Code](https://claude.com/claude-code), guarded by hooks and orchestrated with [herdr](https://herdr.dev/) worktrees.**
 
-Every change happens in a worktree on a branch; `main` only ever receives tested, squash-merged commits — so **main is deployable by construction, not by discipline**. Claude Code hooks enforce this physically, so a long session can't drift into committing on main or editing the primary checkout in place.
+Every change happens in a worktree on a branch, landed into `main` as a single squash-merged commit — so `main` stays a clean, linear history by construction, not by discipline. Claude Code hooks catch the common accidental slips — a direct `git commit` on main, a direct edit to the primary checkout — so a long session can't drift into them. They're guardrails against careless agents, not a security boundary against adversarial ones; see [What this does and does not enforce](#what-this-does-and-does-not-enforce).
 
 ---
 
@@ -14,13 +14,13 @@ Let an AI coding agent work directly in your repo's main checkout and three thin
 2. It edits files in place — no isolation, no branch, no reviewable history.
 3. Long "let's build X" sessions accrete half-finished, uncommittable mess.
 
-Discipline-by-reminder doesn't survive a long session. This repo makes the discipline *physical*.
+Discipline-by-reminder doesn't survive a long session. This repo backs the doctrine with hooks that catch the two most common slips before they happen — not a guarantee nothing can go wrong, but a real floor under the discipline.
 
 ## How it works — two layers
 
 **Soft layer (doctrine).** A `# Git hygiene` section for your `CLAUDE.md` plus the full [playbook](docs/git-hygiene-playbook.md). This is what the model reads: always work in a worktree, orchestrate don't implement, land via squash, clean up immediately.
 
-**Hard layer (three hooks).** These run inside every Claude Code session and can't be talked out of:
+**Hard layer (three hooks).** These run pre-execution inside every Claude Code session, so catching the two most common drift patterns doesn't depend on the model remembering the doctrine:
 
 | Hook | Event | What it does |
 |---|---|---|
@@ -28,9 +28,27 @@ Discipline-by-reminder doesn't survive a long session. This repo makes the disci
 | `git-hygiene-edit-guard.sh` | `PreToolUse` / Edit·Write·NotebookEdit | Blocks file edits inside a repo's **primary** checkout — forcing the work into a worktree. Exempts non-repo files, `~/.claude/**`, and repos with no commits yet. |
 | `git-hygiene-dispatch-nudge.sh` | `UserPromptSubmit` | A **nudge, not a block**: when a feature/design/build request lands in a primary checkout, it reminds the session to *scope then dispatch* to a worker instead of implementing inline. Silent in worktrees, non-repos, and for plain questions. |
 
+The commit guard decides by pattern-matching the literal `Bash` command string — a structurally weaker approach, since shell can express the same operation in unbounded ways. The edit guard is sounder: it resolves the target file's checkout via git itself and compares it against the calling agent's cwd, no string-parsing involved. Both are still guardrails against a careless agent taking the obvious wrong action, not a security boundary against one that's trying to get around them — for different reasons in each case. See [What this does and does not enforce](#what-this-does-and-does-not-enforce) for the specifics.
+
 **Plus two helpers:**
 - **`/land` skill** — the landing sequence: rebase → test → review → squash-merge → cleanup, with the safety checks (dirty-checkout refusal, race re-check against a concurrently-landed main).
 - **`herdr-watch-agent.sh`** — lets an orchestrator background-watch a dispatched worker and get woken when it finishes/blocks, instead of foreground-waiting.
+
+## What this does and does not enforce
+
+**Does:** catch, before execution, the two most common ways a long session drifts — a direct `git commit` on `main`/`master`, and a direct edit to the primary checkout — with a clear error message and zero cost to the normal workflow.
+
+**Does not — commit guard:** stop a command aimed around it. Verified bypasses include quoting/interpreter indirection (`sh -c "git commit -m x"`, `\git commit`), non-`commit` porcelain and plumbing on main (`git merge`, `git pull`, `git cherry-pick`, `git revert`, `git commit-tree` + `git update-ref`), a non-leading `cd` in a compound command, `GIT_DIR` retargeting, detached HEAD in the primary checkout (it exempts branch commits by branch *name*, and detached HEAD has none), and branches not literally named `main`/`master`.
+
+**Does not — edit guard:** its path-and-cwd resolution is sound, but narrower — it only sees `Edit`/`Write`/`NotebookEdit`, it classifies a target by its containing directory (so a final-component symlink pointing outside the worktree isn't caught), and it compares `cwd` to the worktree path as text (so a path that's the same directory via a different spelling, e.g. macOS's `/tmp` vs. `/private/tmp`, can produce a false denial).
+
+Two gaps matter more than any single bypass, and apply to both guards:
+- **The tool surface isn't closed.** The hooks match only `Bash` and `Edit`/`Write`/`NotebookEdit`. Any other tool that can run a shell command or write a file — an MCP server exposing `execute_shell_command` or `create_text_file`, for instance — bypasses both guards entirely, as do `sed -i`, shell redirects, `patch`, `git apply`, and build/format scripts.
+- **The hooks can disarm themselves.** The edit guard exempts `~/.claude/**`, which is where the hooks and `settings.json` live — one edit there turns off enforcement, in the same session.
+
+Neither guard touches your own terminal — a `git commit` or file edit you type by hand isn't in scope (see [Caveats](#caveats)).
+
+For a real security boundary, see the playbook's ["What this does and does not enforce"](docs/git-hygiene-playbook.md#what-this-does-and-does-not-enforce) for the git-level-hooks and remote-branch-protection options (not implemented in this repo).
 
 ## The orchestrator / worker model
 
@@ -49,7 +67,7 @@ The **worker** owns the entire lifecycle in its one worktree — design, spec, p
 
 - **Claude Code** (this is built on its hook system).
 - **git** and **jq** — required. The hooks parse their input with `jq`.
-- **herdr** — *optional*. It powers the full dispatch/supervise flow. Without it the hooks still enforce all the worktree/main discipline; the "dispatch a worker into its own pane" step degrades to a plain `git worktree add` with the session doing the work itself. You get most of the value with zero herdr.
+- **herdr** — *optional*. It powers the full dispatch/supervise flow. Without it the hooks still catch the same worktree/main violations; the "dispatch a worker into its own pane" step degrades to a plain `git worktree add` with the session doing the work itself. You get most of the value with zero herdr.
 
 ## Install
 

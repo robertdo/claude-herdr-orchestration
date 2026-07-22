@@ -1,8 +1,8 @@
 # Git Hygiene Playbook — Claude + herdr
 
-*Applies uniformly to every git repo you work in. (The author keeps repos under `~/src`, but the hooks don't hardcode that path — they detect the primary checkout from git itself.) Non-git directories are exempt.*
+*Applies uniformly to every git repo you work in. (The author keeps repos under `~/src`, but the hooks don't hardcode that path — they detect the primary checkout from git itself.) Non-git directories are exempt. The enforcement hooks below only recognize branches literally named `main` or `master` — a repo with a differently named default branch is unguarded.*
 
-**The system in one line:** every change happens in a herdr worktree on a branch; main only ever receives tested, squash-merged commits — so main is deployable by construction, not by discipline.
+**The system in one line:** every change happens in a herdr worktree on a branch, landed as a single squash-merged commit — so main stays a clean, linear history by construction, not by discipline. Landing via `bin/land.sh` runs tests as part of that path, but nothing *enforces* landing through the script — a hook-permitted `git merge --squash` + `git commit` reaches main without running them. See "What this does and does not enforce" below.
 
 ## 1. The prime rule
 
@@ -22,7 +22,37 @@ is the universal first step of any work.
 - `git-hygiene-edit-guard.sh` (Edit/Write/NotebookEdit): file edits inside a repo's *primary* checkout are denied on any branch; edits in a linked worktree are denied when the session's cwd is a different checkout of the same repo (orchestrator meddling). Exempt: non-repo files, `~/.claude/**`, repos with no commits.
 - `git-hygiene-guard.sh` (Bash): `git commit` denied on main/master in any checkout (except squash-merge/merge landings and empty-repo bootstrap), and denied on non-main branches when in the primary checkout.
 - `git-hygiene-dispatch-nudge.sh` (UserPromptSubmit): a NUDGE, not a block — when a prompt in a primary checkout reads as feature/design/build work, it reminds the session to scope-then-dispatch to a worker instead of implementing inline. Silent in linked worktrees, non-repos, and for plain questions.
-- Limits: Bash file writes (`sed -i`, redirects) bypass the edit guard but their commits are still caught; hooks govern Claude Code sessions only, never your own terminal.
+
+### What this does and does not enforce
+
+The two guards take genuinely different approaches, and their limits are different in kind — one is structurally unsound, the other is sound but narrow. Both are **guardrails against careless agents, not a security boundary against adversarial ones**. That's not a small caveat, but it's not a reason to skip them either: catching a plain `git commit` on main and a direct edit to the primary checkout, pre-execution, with a good error message, at zero workflow cost, is genuinely valuable — it stops the two most common ways a long session drifts.
+
+**Does:** deny, before execution, a direct `git commit` on `main`/`master` (outside a squash-merge landing or empty-repo bootstrap) and a direct file edit inside the primary checkout, on any branch.
+
+**Does not — the commit guard (`git-hygiene-guard.sh`, Bash) is structurally unsound, not merely buggy.** It decides whether a command is a forbidden git operation by pattern-matching the literal command string, and the input language is Turing-complete shell — "does this string eventually move `refs/heads/main`" is undecidable in general. Verified bypasses:
+- Quoting/interpreter indirection: `sh -c "git commit -m x"`, `"git" commit`, `'git' commit`, `\git commit` — the guard scans the literal command string, so anything that reaches `git commit` through another layer of interpretation isn't recognized as `git commit`.
+- Flag values: `git -c user.name=x commit` — the flag-group regex expects `-c` to be immediately followed by `commit` but instead consumes the flag's value and misses. This one fires *accidentally*, not just adversarially — agents pass `-c` routinely.
+- Non-`commit` porcelain and plumbing that also move `main`: `git merge` (a plain fast-forward is the likely *accidental* case here, and it sails straight through), `git pull`, `git cherry-pick`, `git revert`, `git commit-tree` + `git update-ref refs/heads/main`, `git branch -f main`.
+- Non-leading `cd`: `true; cd /repo && git commit` — the guard resolves its target directory from the session cwd or a leading `cd`, so it inspects the wrong repo.
+- Env retargeting: `GIT_DIR=/repo/.git git commit`, run from a non-repo cwd.
+- Two-step state fabrication: `touch .git/SQUASH_MSG` (allowed — it's not a commit), then `git commit` on main (allowed — the guard sees `SQUASH_MSG` and assumes a landing in progress).
+- Detached HEAD in the primary checkout is entirely exempt. The guard derives `branch` from `git symbolic-ref --short -q HEAD`, which is empty in detached HEAD; the primary-checkout branch-commit deny only fires when `[ -n "$branch" ]`, so an empty branch name skips it and the command exits allowed — regardless of checkout.
+- Only branches literally named `main`/`master` are recognized at all.
+
+**Does not — the edit guard (`git-hygiene-edit-guard.sh`, Edit/Write/NotebookEdit) is sound in approach, narrower in scope.** It doesn't parse strings: it resolves the target file's directory, asks git which checkout that directory belongs to (`--absolute-git-dir` vs. `--git-common-dir`), and for a linked worktree compares that against the calling agent's `cwd`. A primary-checkout edit is denied unconditionally — there's no branch check to route around, so (unlike the commit guard) detached HEAD gives no exemption here. Its real limits are scope and path resolution, not string-parsing:
+- Tool scope: it matches only `Edit`/`Write`/`NotebookEdit`. Any other write path — `sed -i`, shell redirects, `patch`, `git apply`, formatters, build scripts, an MCP server's file/shell tools — never reaches it.
+- Parent-directory classification: it classifies by walking up from `dirname` of the target path to the nearest existing directory, then asks git about *that* directory — so if the file path's final component is itself a symlink pointing outside the worktree, the guard classifies the (in-worktree) containing directory while the actual write lands wherever the symlink resolves.
+- Textual cwd comparison: the linked-worktree check (`case $cwd in "$tl"|"$tl"/*)`) compares the hook payload's `cwd` against git's toplevel path as strings, not after resolving symlinks — a `cwd` that names the same directory via a different but equivalent path (e.g. macOS's `/tmp` vs. `/private/tmp`) can mismatch and produce a false denial.
+
+**The tool surface is not closed.** The hooks are `PreToolUse` matchers scoped to specific tools — `Bash` for the commit guard, `Edit`/`Write`/`NotebookEdit` for the edit guard. Any other tool that can run a shell command or write a file bypasses both, completely: an MCP server exposing file or shell tools (e.g. serena's `create_text_file`, `replace_content`, `execute_shell_command`), `sed -i`, shell redirects, `patch`, `git apply`, formatters, and build scripts never reach either guard.
+
+**The hooks can disarm themselves.** The edit guard exempts `~/.claude/**` — the exact directory the hooks and `settings.json` live in. One `Edit` to the guard script, or to `settings.json`, turns off enforcement, effective immediately, in the same session.
+
+**Hooks govern Claude Code sessions only — never your own terminal.** A `git commit` typed directly into your shell, or a file edited by hand, isn't touched by any of this; it constrains the agent, not you.
+
+**For hard enforcement** (documented here as options, not implemented in this repo):
+- **Git-level hooks** (`pre-commit`, `pre-merge-commit`, `reference-transaction`) run inside git itself, so they're immune to command-spelling tricks and see every tool that ultimately invokes `git` — closing the tool-surface gap above. They're still deletable or edit-around-able by any process running as the same user, so they don't close the self-disarm gap.
+- **Remote branch protection** with squash-only merges enforced server-side is the only boundary a same-uid local process can't remove — it's the actual privilege boundary if you need one.
 
 ### Three tiers of change (who does the work)
 
@@ -97,7 +127,7 @@ Scripted as `bin/land.sh <branch>` (see `skills/land/SKILL.md` for the refusal t
 
 1. **Rebase** on latest main — surface conflicts in the worktree, never on main; the script aborts the rebase automatically on conflict rather than leaving it mid-resolution.
 2. **Test** — run the suite; if the project has none, the degraded equivalent (build / lint), and say so in the commit message.
-3. **Self-review** the diff — printed for you to read before it merges; `--dry-run` stops here, before any merge or cleanup.
+3. **Print the diff** — shown as the script runs, not as a gate: without `--dry-run` the script proceeds straight to merging in the same run, so review at this step is retrospective (you're reading what already merged, not approving what's about to). Pass `--dry-run` to actually stop here, before any merge or cleanup, if you want to review first.
 4. **Race-check** that main hasn't moved since the rebase, then **squash-merge locally** into main — one clean commit per change; message describes the change, not the journey (`-m` sets it explicitly). No PRs required for solo work; open a PR instead when you want that record.
 
 ## 5. Cleanup — immediately, not eventually
