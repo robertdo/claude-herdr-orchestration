@@ -26,7 +26,7 @@ It runs the project's tests, builds the landing commit as an object (`git commit
 
 ## Three things to know
 
-**It never rebases.** If the branch doesn't already contain main, it refuses and prints the exact `git rebase` to run in the worktree. Rebasing is your preparation step, not the script's — that's what keeps conflict recovery out of the landing path entirely.
+**It rebases automatically.** If the branch doesn't already contain main, land.sh rebases it onto main's tip inside its own worktree — an isolated checkout, so a conflict there can't touch main — before anything is tested or built. A conflict leaves the rebase **in progress** in the worktree: resolve it there, finish the rebase, then re-run `bin/land.sh <branch>`. Re-running before you finish refuses rather than destroying anything — a paused rebase looks detached, so land.sh can't find the worktree until the rebase is finished or aborted.
 
 **Review is retrospective.** Without `--dry-run` the diff is printed and the landing proceeds in the same run: you are reading what just landed, not approving what is about to. The script is called non-interactively by agents, so it never prompts. `--dry-run` is the real gate — it builds and prints the candidate and stops, and the candidate SHA it prints stays landable by hand (`git merge --ff-only <sha>`) for as long as main hasn't moved. If you want a gate, run `--dry-run` first.
 
@@ -34,20 +34,21 @@ It runs the project's tests, builds the landing commit as an object (`git commit
 
 ## Killed mid-run?
 
-Nothing to recover. Until the final fast-forward the script has created only a candidate commit object, which is unreferenced and inert — main's index and working tree are never touched. Re-run it. (Give it a generous timeout anyway; the test suite can take minutes.)
+Nothing to recover. Until the final fast-forward the script has created only a candidate commit object, which is unreferenced and inert — main's index and working tree are never touched. Killed mid-rebase is equally harmless: the branch's worktree is left mid-rebase and main is untouched — finish or abort the rebase in the worktree, then re-run. Re-run it. (Give it a generous timeout anyway; the test suite can take minutes.)
 
 ## Refusals
 
 | Refusal | Why | Fix |
 |---|---|---|
-| branch doesn't contain main | it will not rebase for you | run the `git rebase` it prints, in the worktree, then re-run |
+| rebase onto main conflicts | can't safely land unrebased content | resolve the conflicts in the worktree, `git rebase --continue` (or `--skip`/`--abort`), then re-run |
+| branch worktree has a paused/conflicted rebase, merge, or cherry-pick | auto-rebasing over it could destroy work that's only recoverable via reflog | finish or abort that operation in the worktree first |
 | no test suite, and no `--check` | it will not silently land unverified code | give it `--check '<cmd>'`, or state the omission with `--no-tests` |
 | branch is main | main can't land onto itself | pass the actual branch name |
 | primary checkout isn't main/master | landing would silently go to the wrong branch | switch to main, or set `LAND_MAIN_BRANCH=<branch>` |
 | branch worktree is dirty | uncommitted changes wouldn't be in the squash | commit first — WIP commits are fine, squash erases them |
 | main has tracked modifications | they aren't the script's to clobber | commit or stash them on main first |
 | main has untracked files | reported, not fatal — they can't enter the landing commit | ignore, or clean up separately |
-| fast-forward failed | main moved, or its working tree is in the way | nothing landed; rebase the branch on the new main and re-run |
+| fast-forward failed | main moved, or its working tree is in the way | nothing landed; re-run — land.sh rebases the branch onto the new main automatically |
 | branch advanced during the run | the new commits weren't verified | re-run so they get tested too |
 | run from inside a worktree | it lands *onto* the primary checkout | run it from there |
 
@@ -67,5 +68,6 @@ No landing needed — clean up directly:
 | Running `bin/land.sh` from inside the worktree | Run it from the repo's primary checkout — it refuses otherwise |
 | Expecting the printed diff to be a gate | It isn't. Use `--dry-run` first if you want to approve before landing |
 | Reaching for `--no-tests` when a check exists | Use `--check '<cmd>'` — `--no-tests` is for projects with genuinely nothing to run |
-| Treating a fast-forward failure as an error to work around | It means main moved — rebase in the worktree and re-run |
+| Treating a fast-forward failure as an error to work around | It means main moved — just re-run; land.sh rebases onto the new main automatically |
+| Aborting a conflicted rebase yourself and expecting the conflicts to still be there | land.sh leaves conflicts **in progress** on purpose — resolve them in the worktree, don't abort unless you mean to discard the rebase |
 | Deploying right after merging | Deploy only on explicit request |

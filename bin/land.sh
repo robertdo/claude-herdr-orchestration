@@ -20,9 +20,14 @@
 # nothing and can be killed at any point with zero cleanup. If main advanced
 # concurrently the fast-forward simply fails, on its own.
 #
-# IT DOES NOT REBASE. A branch that does not already contain main is refused,
-# with the command to run. Rebasing is a preparation step you do in the worktree;
-# keeping it out of here is what removes the abort/recovery machinery entirely.
+# IT REBASES AUTOMATICALLY. When <branch> doesn't already contain main, the
+# branch's own worktree — an isolated checkout — is rebased onto main's pinned
+# tip before anything is tested or built, and the (possibly rewritten)
+# post-rebase tip becomes the SHA pinned for the rest of the run. A conflict
+# leaves that rebase IN PROGRESS in the worktree; main is never touched by it.
+# Killing land.sh mid-rebase is equally harmless: the worktree is left
+# mid-rebase, main is untouched, and there is nothing to clean up. Do not add a
+# trap "to fix" that — an interrupted rebase needs none.
 #
 # REVIEW IS RETROSPECTIVE. Without --dry-run the diff is printed and the landing
 # proceeds in the same run — you are reading what just landed, not approving what
@@ -54,8 +59,9 @@ main onto it and removes the worktree and branch.
   --check CMD   run CMD in the worktree instead of auto-detecting (env: LAND_CHECK_CMD)
   -m MESSAGE    landing commit message
 
-land.sh never rebases: if <branch> does not already contain main it refuses and
-prints the command to run.
+land.sh rebases <branch> onto main automatically, in its own worktree, when it
+doesn't already contain main. A conflict leaves that rebase in progress for you
+to resolve there; re-run land.sh once it's finished.
 EOF
 }
 
@@ -171,12 +177,24 @@ $tracked"
   [ -z "$untracked" ] || { info "note: main checkout has untracked files (not fatal — they cannot enter the landing commit):"; info "$untracked"; }
 fi
 
-# ---- 1: the branch must already contain main ---------------------------------
+# ---- 1: the branch must contain main; rebase automatically if it doesn't ----
 
-git -C "$main_dir" merge-base --is-ancestor "$base_sha" "$branch_sha" || fail \
-  "$branch does not contain $main_branch ($base_sha) — land.sh does not rebase. Update the branch in its own worktree, then re-run:
-  git -C \"$worktree_path\" rebase refs/heads/$main_branch
-  bin/land.sh $branch"
+# The rebase happens in the branch's OWN worktree — an isolated checkout — so a
+# conflict or interruption here can never touch the primary checkout or main.
+# That isolation is what makes it safe to do automatically, unlike the
+# squash-merge below.
+if git -C "$main_dir" merge-base --is-ancestor "$base_sha" "$branch_sha"; then
+  info "Step 1: $branch already contains $main_branch"
+else
+  info "Step 1: $branch does not contain $main_branch — rebasing it onto $base_sha in $worktree_path"
+  if ! git -C "$worktree_path" rebase "$base_sha" >&2; then
+    fail "rebase of $branch onto $main_branch ($base_sha) conflicted and is left IN PROGRESS in $worktree_path — resolve the conflicts there, run 'git rebase --continue' (or --skip/--abort), then re-run: bin/land.sh $branch"
+  fi
+  # The rebase rewrites commits; every SHA pinned from here on must be the new
+  # tip, or what gets tested/landed silently reverts to pre-rebase content.
+  branch_sha=$(git -C "$main_dir" rev-parse --verify "refs/heads/$branch")
+  info "Step 1: rebased; $branch is now at $branch_sha"
+fi
 
 if [ "$(git -C "$main_dir" rev-parse "$branch_sha^{tree}")" = "$(git -C "$main_dir" rev-parse "$base_sha^{tree}")" ]; then
   info "$branch has no effective changes vs $main_branch — nothing to land."

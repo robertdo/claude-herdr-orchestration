@@ -138,21 +138,33 @@ check "subject" "$(git -C "$repo" log -1 --format=%s main)" "feat: subject line"
 check "body preserved" "$(git -C "$repo" log -1 --format=%b main)" "Body paragraph one.
 Body line two."
 
-echo "== 2. refuses when the branch does not contain main =="
+echo "== 2. a branch behind main is rebased automatically and lands =="
 repo=$(mkrepo); wt=$(wtof "$repo")
 echo other > "$repo/other.txt"
 git -C "$repo" add -A >>"$SETUPLOG" 2>&1; git -C "$repo" commit -qm 'main moved' >>"$SETUPLOG" 2>&1
-before=$(git -C "$repo" rev-parse main)
-err=$(run "$repo" feat/x 2>&1 >/dev/null); rc=$?
-check "exit 1" "$rc" "1"
-check "says it does not rebase" "$(printf '%s' "$err" | grep -c 'does not rebase')" "1"
-check "names the exact rebase command" "$(printf '%s' "$err" | grep -c 'rebase refs/heads/main')" "1"
-check "main untouched" "$(git -C "$repo" rev-parse main)" "$before"
-check "worktree untouched" "$([ -d "$wt" ] && echo present)" "present"
-git -C "$wt" rebase -q refs/heads/main >>"$SETUPLOG" 2>&1
-sha=$(run "$repo" feat/x 2>/dev/null); rc=$?
-check "lands once the user rebases as told" "$rc" "0"
-check "main == landed sha" "$(git -C "$repo" rev-parse main)" "$sha"
+newbase=$(git -C "$repo" rev-parse main)
+sha=$(run "$repo" feat/x 2>"$ROOT/err2"); rc=$?
+check "exit 0" "$rc" "0"
+check "says it rebased" "$(grep -c 'rebasing it onto' "$ROOT/err2")" "1"
+check "landed" "$(git -C "$repo" rev-parse main)" "$sha"
+check "landed onto the new main tip (not the stale pinned one)" "$(git -C "$repo" rev-parse main^)" "$newbase"
+check "worktree removed after landing" "$([ -d "$wt" ] && echo present || echo gone)" "gone"
+
+echo "== 2b. tests run against POST-rebase content, and the landed tree is pinned to it =="
+repo=$(mkrepo); wt=$(wtof "$repo")
+echo mainonly > "$repo/main-only.txt"
+git -C "$repo" add -A >>"$SETUPLOG" 2>&1; git -C "$repo" commit -qm 'main advances' >>"$SETUPLOG" 2>&1
+# the check command itself asserts it can see main-only.txt (which only exists
+# post-rebase) and the branch's own change; if tests ran before the rebase (or
+# the rebase never happened), this check fails and land.sh exits nonzero.
+sha=$(run "$repo" feat/x --check "git rev-parse HEAD > $ROOT/postrebase-head; [ -f main-only.txt ] && grep -q changed file.txt" 2>"$ROOT/err2b"); rc=$?
+check "exit 0 (the check saw post-rebase content, proving tests ran after the rebase)" "$rc" "0"
+postrebase_head=$(cat "$ROOT/postrebase-head" 2>/dev/null)
+check "captured a post-rebase HEAD sha" "$([ -n "$postrebase_head" ] && echo yes)" "yes"
+check "landing tree == the actual post-rebase worktree tree (proves branch_sha was re-pinned)" \
+  "$(git -C "$repo" rev-parse 'main^{tree}')" "$(git -C "$repo" rev-parse "$postrebase_head^{tree}" 2>/dev/null)"
+check "landed tree includes main's new file" "$([ -e "$repo/main-only.txt" ] && echo yes)" "yes"
+check "landed tree still has the branch's own change" "$(cat "$repo/file.txt")" "changed"
 
 echo "== 3. refuses a dirty branch worktree =="
 repo=$(mkrepo); wt=$(wtof "$repo"); before=$(git -C "$repo" rev-parse main)
@@ -251,9 +263,8 @@ check "worktree not removed" "$([ -d "$wt" ] && echo present)" "present"
 check "branch not deleted" "$(git -C "$repo" rev-parse --verify --quiet refs/heads/feat/x >/dev/null && echo alive)" "alive"
 check "main checkout left clean" "$(git -C "$repo" status --porcelain)" ""
 check "no interrupted-merge wreckage" "$({ [ -f "$repo/.git/MERGE_HEAD" ] || [ -f "$repo/.git/SQUASH_MSG" ]; } && echo wreckage || echo clean)" "clean"
-git -C "$wt" rebase -q refs/heads/main >>"$SETUPLOG" 2>&1
 sha=$(run "$repo" feat/x 2>/dev/null); rc=$?
-check "recovers on re-run after a rebase" "$rc" "0"
+check "recovers on re-run (auto-rebased onto the interloper, no manual rebase needed)" "$rc" "0"
 check "main == landed sha" "$(git -C "$repo" rev-parse main)" "$sha"
 
 echo "== 8b. the branch advancing mid-run is refused =="
@@ -359,6 +370,55 @@ git -C "$repo" config commit.gpgsign false
 sha=$(run "$repo" feat/x 2>/dev/null); rc=$?
 check "lands once signing is not demanded" "$rc" "0"
 check "the resulting commit is unsigned" "$(git -C "$repo" log -1 --format=%G? main)" "N"
+
+echo "== 17. a rebase conflict is left in progress and lands nothing =="
+repo=$(mkrepo); wt=$(wtof "$repo")
+echo mainconflict > "$repo/file.txt"
+git -C "$repo" add -A >>"$SETUPLOG" 2>&1; git -C "$repo" commit -qm 'main conflicts' >>"$SETUPLOG" 2>&1
+before=$(git -C "$repo" rev-parse main)
+err=$(run "$repo" feat/x 2>&1 >/dev/null); rc=$?
+check "exit 1" "$rc" "1"
+check "says the rebase is left IN PROGRESS" "$(printf '%s' "$err" | grep -c 'IN PROGRESS')" "1"
+check "tells the user to resolve (matches the behaviour: nothing was aborted)" "$(printf '%s' "$err" | grep -c 'resolve the conflicts')" "1"
+check "names the re-run command" "$(printf '%s' "$err" | grep -c 'bin/land.sh feat/x')" "1"
+check "main untouched" "$(git -C "$repo" rev-parse main)" "$before"
+check "worktree not removed" "$([ -d "$wt" ] && echo present)" "present"
+check "branch not deleted" "$(git -C "$repo" rev-parse --verify --quiet refs/heads/feat/x >/dev/null && echo alive)" "alive"
+rd=$(git -C "$wt" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null)
+ra=$(git -C "$wt" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null)
+check "the worktree is genuinely left mid-rebase" "$({ [ -d "$rd" ] || [ -d "$ra" ]; } && echo yes || echo no)" "yes"
+
+echo "== 17b. re-running before finishing the conflict refuses, not destroys =="
+err=$(run "$repo" feat/x 2>&1 >/dev/null); rc=$?
+check "exit 1" "$rc" "1"
+check "refuses because the paused rebase reports as detached" "$(printf '%s' "$err" | grep -c 'no worktree found for branch')" "1"
+check "main still untouched" "$(git -C "$repo" rev-parse main)" "$before"
+check "worktree still not destroyed" "$([ -d "$wt" ] && echo present)" "present"
+echo resolved > "$wt/file.txt"
+git -C "$wt" add file.txt >>"$SETUPLOG" 2>&1
+GIT_EDITOR=true git -C "$wt" rebase --continue >>"$SETUPLOG" 2>&1
+sha=$(run "$repo" feat/x 2>/dev/null); rc=$?
+check "lands once the user finishes the rebase" "$rc" "0"
+check "main == landed sha" "$(git -C "$repo" rev-parse main)" "$sha"
+check "the resolved content landed" "$(cat "$repo/file.txt")" "resolved"
+
+echo "== 18. a worktree paused mid interactive-rebase (clean status) is refused, not destroyed =="
+repo=$(mkrepo); wt=$(wtof "$repo"); before=$(git -C "$repo" rev-parse main)
+seqeditor="$ROOT/seqeditor.sh"
+cat > "$seqeditor" <<'EOF'
+#!/bin/sh
+# turn the first "pick" into "edit" so the rebase pauses right after that commit
+awk 'NR==1{sub(/^pick/,"edit")}{print}' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+EOF
+chmod +x "$seqeditor"
+GIT_SEQUENCE_EDITOR="$seqeditor" git -C "$wt" rebase -i HEAD~1 >>"$SETUPLOG" 2>&1 || true
+check "fixture is valid: rebase paused with a clean worktree" "$(git -C "$wt" status --porcelain)" ""
+err=$(run "$repo" feat/x 2>&1 >/dev/null); rc=$?
+check "exit 1" "$rc" "1"
+check "refuses (paused rebase reports as detached, clean status notwithstanding)" "$(printf '%s' "$err" | grep -c 'no worktree found for branch')" "1"
+check "main untouched" "$(git -C "$repo" rev-parse main)" "$before"
+check "worktree not destroyed" "$([ -d "$wt" ] && echo present)" "present"
+git -C "$wt" rebase --abort >>"$SETUPLOG" 2>&1 || true
 
 echo
 echo "=============================================="
