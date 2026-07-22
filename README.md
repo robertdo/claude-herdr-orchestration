@@ -18,17 +18,16 @@ Discipline-by-reminder doesn't survive a long session. This repo backs the doctr
 
 ## How it works — two layers
 
-**Soft layer (doctrine).** A `# Git hygiene` section for your `CLAUDE.md` plus the full [playbook](docs/git-hygiene-playbook.md). This is what the model reads: always work in a worktree, orchestrate don't implement, land via squash, clean up immediately.
+**Soft layer (doctrine).** A `# Git hygiene` section for your `CLAUDE.md` plus the full [playbook](docs/git-hygiene-playbook.md). This is what the model reads: always work in a worktree, orchestrate don't implement, land via `bin/land.sh`, clean up immediately. The playbook is the normative source for the rules themselves — this README doesn't restate them.
 
-**Hard layer (three hooks).** These run pre-execution inside every Claude Code session, so catching the two most common drift patterns doesn't depend on the model remembering the doctrine:
+**Hard layer (two hooks).** These run `PreToolUse`, before the tool executes, so catching the two most common drift patterns doesn't depend on the model remembering the doctrine:
 
 | Hook | Event | What it does |
 |---|---|---|
 | `git-hygiene-guard.sh` | `PreToolUse` / Bash | A best-effort linter, not enforcement: blocks `git commit` on `main`/`master` (except an empty repo's first commit — no exception for a manual squash-merge), and blocks branch commits made in a primary checkout. |
 | `git-hygiene-edit-guard.sh` | `PreToolUse` / Edit·Write·NotebookEdit | Blocks file edits inside a repo's **primary** checkout — forcing the work into a worktree. Exempts non-repo files, `~/.claude/**`, and repos with no commits yet. |
-| `git-hygiene-dispatch-nudge.sh` | `UserPromptSubmit` | A **nudge, not a block**: when a feature/design/build request lands in a primary checkout, it reminds the session to *scope then dispatch* to a worker instead of implementing inline. Silent in worktrees, non-repos, and for plain questions. |
 
-The commit guard decides by pattern-matching the literal `Bash` command string — a structurally weaker approach, since shell can express the same operation in unbounded ways. The edit guard is sounder: it resolves the target file's checkout via git itself and compares it against the calling agent's cwd, no string-parsing involved. Both are still guardrails against a careless agent taking the obvious wrong action, not a security boundary against one that's trying to get around them — for different reasons in each case. See [What this does and does not enforce](#what-this-does-and-does-not-enforce) for the specifics.
+The commit guard decides by pattern-matching the literal `Bash` command string — a structurally weaker approach, since shell can express the same operation in unbounded ways. The edit guard is sounder: it resolves the target file's checkout via git itself and compares it against the calling agent's cwd, no string-parsing involved. Both are still guardrails against a careless agent taking the obvious wrong action, not a security boundary against one that's trying to get around them — for different reasons in each case. Full bypass list and rationale: the playbook's ["What this does and does not enforce"](docs/git-hygiene-playbook.md#what-this-does-and-does-not-enforce).
 
 **Plus two helpers:**
 - **`/land` skill**, backed by `bin/land.sh` — the landing sequence: rebase onto main automatically → run tests (auto-detected, or `--check`/`--no-tests`) → build the landing commit as an object (`git commit-tree`, off the branch's own tree — main's index and working tree are never touched) → print the diff → fast-forward main onto it (`git merge --ff-only`) → clean up. Review is retrospective in the default run (the merge happens in the same invocation that prints the diff); `--dry-run` is the actual gate. Refuses a dirty branch worktree, tracked changes on main, or landing with no verification found (unless `--no-tests` says the omission is deliberate).
@@ -38,17 +37,11 @@ The commit guard decides by pattern-matching the literal `Bash` command string �
 
 **Does:** catch, before execution, the two most common ways a long session drifts — a direct `git commit` on `main`/`master`, and a direct edit to the primary checkout — with a clear error message and zero cost to the normal workflow.
 
-**Does not — commit guard:** stop a command aimed around it. Verified bypasses include quoting/interpreter indirection (`sh -c "git commit -m x"`, `\git commit`), non-`commit` porcelain and plumbing on main (`git merge`, `git pull`, `git cherry-pick`, `git revert`, `git commit-tree` + `git update-ref`), a non-leading `cd` in a compound command, `GIT_DIR` retargeting, detached HEAD in the primary checkout (it exempts branch commits by branch *name*, and detached HEAD has none), and branches not literally named `main`/`master`. It also has **no exception for a manual squash-merge** — `git merge --squash` + `git commit` on main is denied like any other direct commit, deliberately: the blessed path (`bin/land.sh`) never produces one, and the guard cannot distinguish a real landing from a plain commit by looking at the command text anyway. The per-repository git guard below draws that same line differently — see its "deliberate asymmetry" note in the [playbook](docs/git-hygiene-playbook.md#what-this-does-and-does-not-enforce).
+**Does not:** stop a command or edit aimed around it. The commit guard is a text pattern-match over an unbounded input language (Turing-complete shell), so it has verified bypasses (interpreter indirection, non-`commit` porcelain/plumbing, `GIT_DIR` retargeting, detached HEAD, and deliberately no exception for a manual squash-merge). The edit guard is sound in approach but narrow in scope (only three tools, containing-directory classification, textual `cwd` comparison). Neither closes the tool surface — any MCP server or script that writes files or shells out bypasses both — and both can be disarmed by an edit to `~/.claude/**`, which is exempt. Neither touches your own terminal (see [Caveats](#caveats)).
 
-**Does not — edit guard:** its path-and-cwd resolution is sound, but narrower — it only sees `Edit`/`Write`/`NotebookEdit`, it classifies a target by its containing directory (so a final-component symlink pointing outside the worktree isn't caught), and it compares `cwd` to the worktree path as text (so a path that's the same directory via a different spelling, e.g. macOS's `/tmp` vs. `/private/tmp`, can produce a false denial).
+The full bypass-by-bypass breakdown, the deliberate asymmetry between this guard and the per-repository one below, and the remote-branch-protection option that *is* an actual privilege boundary all live in the playbook's ["What this does and does not enforce"](docs/git-hygiene-playbook.md#what-this-does-and-does-not-enforce) — this section is the summary, that one is the reference.
 
-Two gaps matter more than any single bypass, and apply to both guards:
-- **The tool surface isn't closed.** The hooks match only `Bash` and `Edit`/`Write`/`NotebookEdit`. Any other tool that can run a shell command or write a file — an MCP server exposing `execute_shell_command` or `create_text_file`, for instance — bypasses both guards entirely, as do `sed -i`, shell redirects, `patch`, `git apply`, and build/format scripts.
-- **The hooks can disarm themselves.** The edit guard exempts `~/.claude/**`, which is where the hooks and `settings.json` live — one edit there turns off enforcement, in the same session.
-
-Neither guard touches your own terminal — a `git commit` or file edit you type by hand isn't in scope (see [Caveats](#caveats)).
-
-For a stronger floor than either — one that does not depend on which *tool* issued the command — see [The per-repository git guard](#the-per-repository-git-guard) below. For a boundary that survives an adversary with your uid, you need enforcement somewhere you are not root: see the playbook's ["What this does and does not enforce"](docs/git-hygiene-playbook.md#what-this-does-and-does-not-enforce) for the remote-branch-protection option.
+For a stronger floor than either — one that does not depend on which *tool* issued the command — see [The per-repository git guard](#the-per-repository-git-guard) below.
 
 ## The per-repository git guard
 
@@ -95,14 +88,9 @@ The escape hatch is documented on purpose. You will legitimately need it — to 
 
 ## The orchestrator / worker model
 
-The session sitting in a repo's **main checkout is the orchestrator**. It never implements. It:
+The session sitting in a repo's **main checkout is the orchestrator**: it scopes the work, dispatches a worker into its own worktree, supervises without blocking, and lands when the worker is done. It never implements. The **worker** owns the entire lifecycle in its one worktree — design, spec, plan, implementation, tests — landed in a single squash. One worktree, one worker, one landing.
 
-1. **Scopes** — asks you whatever clarifying questions it needs to size the work (a well-scoped brief is what makes dispatch smart).
-2. **Dispatches** — `herdr worktree create` + launches a Claude worker *inside* the worktree with a self-contained brief.
-3. **Supervises without blocking** — starts `herdr-watch-agent.sh` in the background and ends its turn, staying free to talk to you and dispatch more workers in parallel.
-4. **Lands** — runs `/land` when the worker is done.
-
-The **worker** owns the entire lifecycle in its one worktree — design, spec, plan, implementation, tests — landed in a single squash. One worktree, one worker, one landing.
+This is an operating rule, not architecture — the full model (the three routing tiers, dispatch mechanics, sizing, supervision) is in the `CLAUDE.md` section and the playbook's ["orchestrator model"](docs/git-hygiene-playbook.md#the-orchestrator-model-who-does-the-work-tier-3-in-detail); this README doesn't restate it.
 
 > Bootstrapping a brand-new repo is the one operation done inline (there's no repo to make a worktree from yet) — which is exactly why the commit guard exempts a repo with no commits.
 
@@ -123,7 +111,7 @@ cd claude-herdr-hygiene
 `install.sh` is **idempotent and additive** — safe to re-run, and it never clobbers your existing config:
 
 - copies the hooks, watcher, playbook, and `/land` skill into `~/.claude/`;
-- **merges** the three hooks into `~/.claude/settings.json`, backing it up first (`settings.json.bak-<timestamp>`) and skipping any hook already present;
+- **merges** the two hooks into `~/.claude/settings.json`, backing it up first (`settings.json.bak-<timestamp>`) and skipping any hook already present;
 - **appends** the git-hygiene section to `~/.claude/CLAUDE.md` between markers, backing it up first.
 
 Install into a non-default location with `./install.sh /path/to/.claude` (or `CLAUDE_DIR=… ./install.sh`).
@@ -139,16 +127,18 @@ Install into a non-default location with `./install.sh /path/to/.claude` (or `CL
 | `bin/land.sh` | `~/.claude/bin/` |
 | `docs/git-hygiene-playbook.md` | `~/.claude/docs/` |
 | `skills/land/SKILL.md` | `~/.claude/skills/land/` |
-| `settings/hooks-snippet.json` | merged into `~/.claude/settings.json` |
+| (hook entries) | merged into `~/.claude/settings.json` |
 | `claude-md/git-hygiene-section.md` | merged into `~/.claude/CLAUDE.md` (block replaced on re-run) |
 
 ## Manual install
 
-Prefer not to run the script? Copy the four file groups above into `~/.claude/`, then merge `settings/hooks-snippet.json` into your `settings.json` (adjust `$HOME` to your absolute path if your shell doesn't expand it in hook commands) and paste `claude-md/git-hygiene-section.md` into your `CLAUDE.md`.
+Prefer not to run the script? Copy the file groups above into `~/.claude/`, then merge the two hook entries `install.sh` defines for `git-hygiene-guard.sh` (matcher `Bash`) and `git-hygiene-edit-guard.sh` (matcher `Edit|Write|NotebookEdit`) into your `settings.json` — `install.sh` is the one definition of those entries; read its `jq` filter for the exact JSON — and paste `claude-md/git-hygiene-section.md` into your `CLAUDE.md`.
 
 ## Uninstall
 
-Open `/hooks` and disable the three, or remove their entries from `settings.json` and delete the block between the `claude-herdr-hygiene` markers in `CLAUDE.md`. The `.bak-<timestamp>` files the installer left behind let you revert wholesale.
+Open `/hooks` and disable the two, or remove their entries from `settings.json` and delete the block between the `claude-herdr-hygiene` markers in `CLAUDE.md`. The `.bak-<timestamp>` files the installer left behind let you revert wholesale.
+
+If you installed before this repo dropped `git-hygiene-dispatch-nudge.sh` (a `UserPromptSubmit` hook that nudged the session to dispatch instead of implementing inline — folded into the edit guard's coverage, since the edit guard already blocks the consequential mistake), it's now a stale hook: delete `~/.claude/hooks/git-hygiene-dispatch-nudge.sh` and its entry under `hooks.UserPromptSubmit` in `~/.claude/settings.json` by hand. `install.sh` does not remove it for you.
 
 ## Caveats
 

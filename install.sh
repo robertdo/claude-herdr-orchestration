@@ -12,7 +12,7 @@
 #
 # What it does:
 #   • copies hooks/, bin/, docs/, skills/land/ into <claude-dir>/
-#   • merges the three hooks into <claude-dir>/settings.json  (backup first)
+#   • merges the two hooks into <claude-dir>/settings.json  (backup first)
 #   • installs/replaces the git-hygiene section in <claude-dir>/CLAUDE.md (backup first)
 set -euo pipefail
 
@@ -48,7 +48,6 @@ head "Installing into: $CLAUDE_DIR"
 mkdir -p "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/bin" "$CLAUDE_DIR/docs" "$CLAUDE_DIR/skills/land"
 cp "$REPO_DIR"/hooks/git-hygiene-guard.sh          "$CLAUDE_DIR/hooks/"
 cp "$REPO_DIR"/hooks/git-hygiene-edit-guard.sh     "$CLAUDE_DIR/hooks/"
-cp "$REPO_DIR"/hooks/git-hygiene-dispatch-nudge.sh "$CLAUDE_DIR/hooks/"
 cp "$REPO_DIR"/bin/herdr-watch-agent.sh            "$CLAUDE_DIR/bin/"
 cp "$REPO_DIR"/bin/land.sh                         "$CLAUDE_DIR/bin/"
 cp "$REPO_DIR"/docs/git-hygiene-playbook.md        "$CLAUDE_DIR/docs/"
@@ -67,10 +66,9 @@ cp "$SETTINGS" "$SETTINGS.bak-$TS"
 
 GUARD="bash $CLAUDE_DIR/hooks/git-hygiene-guard.sh"
 EDIT="bash $CLAUDE_DIR/hooks/git-hygiene-edit-guard.sh"
-NUDGE="bash $CLAUDE_DIR/hooks/git-hygiene-dispatch-nudge.sh"
 
 jq \
-  --arg guard "$GUARD" --arg edit "$EDIT" --arg nudge "$NUDGE" '
+  --arg guard "$GUARD" --arg edit "$EDIT" '
   # identity = an entry whose hooks[] contains a command mentioning this script;
   # such an entry is replaced wholesale (fixes wrong matcher/path/timeout/wrapper)
   # rather than treated as "already done" — a matching filename is not enough.
@@ -79,15 +77,12 @@ jq \
     | if $idx == null then $arr + [$entry] else $arr | .[$idx] = $entry end;
   .hooks = (.hooks // {})
   | .hooks.PreToolUse = (.hooks.PreToolUse // [])
-  | .hooks.UserPromptSubmit = (.hooks.UserPromptSubmit // [])
   | .hooks.PreToolUse = upsert(.hooks.PreToolUse; "git-hygiene-guard.sh";
       {matcher:"Bash",hooks:[{type:"command",command:$guard,timeout:10,statusMessage:"git hygiene check"}]})
   | .hooks.PreToolUse = upsert(.hooks.PreToolUse; "git-hygiene-edit-guard.sh";
       {matcher:"Edit|Write|NotebookEdit",hooks:[{type:"command",command:$edit,timeout:10,statusMessage:"git hygiene edit check"}]})
-  | .hooks.UserPromptSubmit = upsert(.hooks.UserPromptSubmit; "git-hygiene-dispatch-nudge.sh";
-      {hooks:[{type:"command",command:$nudge,timeout:10,statusMessage:"git hygiene dispatch check"}]})
 ' "$SETTINGS.bak-$TS" > "$SETTINGS"
-say "merged 3 hooks into settings.json (backup: settings.json.bak-$TS)"
+say "merged 2 hooks into settings.json (backup: settings.json.bak-$TS)"
 
 # ---- install/replace CLAUDE.md section -------------------------------------
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"

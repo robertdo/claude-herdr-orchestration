@@ -51,13 +51,11 @@ echo "== 0. static checks =="
 shell_scripts=$(cd "$REPO_ROOT" && ls ./*.sh ./bin/*.sh ./hooks/*.sh ./hooks/git-repo/reference-transaction 2>/dev/null)
 check "found the repo's shell scripts" "$([ -n "$shell_scripts" ] && echo yes)" "yes"
 
-# The guard rejects any move of main that is not a one-commit fast-forward, so a
-# wrong version of it installed HERE would reject the very landing needed to fix
-# it. Installing it into this repo is a deliberate decision, not a side effect of
-# running the tests; everything below installs it only into $ROOT fixtures.
-own_hooks=$(cd "$REPO_ROOT" && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/hooks
-check "the guard is NOT installed into this repository" \
-  "$([ -e "$own_hooks/reference-transaction" ] && echo installed || echo absent)" "absent"
+# Nothing here asserts anything about THIS repo's own .git/hooks. That directory
+# is untracked, per-clone state: whether the guard is installed locally is the
+# operator's deliberate choice, so an assertion either way would test the machine
+# rather than the repository and would fail for anyone whose choice differs.
+# Every test below installs the guard only into throwaway fixtures under $ROOT.
 
 for f in $shell_scripts; do
   check "bash -n $f" "$(cd "$REPO_ROOT" && /bin/bash -n "$f" 2>&1 | head -1)" ""
@@ -705,6 +703,20 @@ check "--hooks-dir installs where git actually looks" "$rc" "0"
 check "  and the hook fires from there" "$(denied "$(grun "$repo" update-ref refs/heads/main "$(printf 'y\n' | git -C "$repo" commit-tree "$(git -C "$repo" rev-parse 'main^{tree}')")")")" "denied"
 
 check "a non-repository target is refused" "$([ "$(inst "$ROOT")" -ne 0 ] && echo refused || echo accepted)" "refused"
+
+echo "== 24b. install.sh installs exactly the two PreToolUse guards, no nudge =="
+
+CLAUDE_TARGET="$ROOT/claude-home"
+rc=0; bash "$REPO_ROOT/install.sh" "$CLAUDE_TARGET" >"$ROOT/instout" 2>&1 || rc=$?
+check "install.sh exits 0" "$rc" "0"
+check "the dispatch-nudge hook is not copied (it no longer exists in the repo)" \
+  "$([ -e "$CLAUDE_TARGET/hooks/git-hygiene-dispatch-nudge.sh" ] && echo present || echo absent)" "absent"
+check "settings.json has no UserPromptSubmit hook" \
+  "$(jq -e '.hooks.UserPromptSubmit' "$CLAUDE_TARGET/settings.json" >/dev/null 2>&1 && echo present || echo absent)" "absent"
+check "settings.json never mentions dispatch-nudge" \
+  "$(grep -c 'dispatch-nudge' "$CLAUDE_TARGET/settings.json")" "0"
+check "settings.json installs exactly the Bash and Edit guards" \
+  "$(jq -r '.hooks.PreToolUse | map(.matcher) | sort | join(",")' "$CLAUDE_TARGET/settings.json")" "Bash,Edit|Write|NotebookEdit"
 
 # ---------------------------------------------------------------------------
 # hooks/git-hygiene-guard.sh — the Bash PreToolUse commit linter (the OTHER

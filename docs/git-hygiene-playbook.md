@@ -18,10 +18,9 @@ is the universal first step of any work.
 - Claude's behavior: a Claude session asked to change code while sitting in a main checkout creates (or asks to create) a worktree first. Claude never edits or commits in main's checkout directly.
 - Parallel agents never share a checkout. One worktree = one concern.
 
-**Enforcement hooks (all Claude Code sessions).** Two Claude Code hooks — added after a session satisfied the letter of the commit hook by doing `git checkout -b` in the primary checkout, working there, and squash-landing — plus one soft nudge, plus one git-level hook that is stronger than either but opt-in per repo:
+**Enforcement hooks (all Claude Code sessions).** Two Claude Code hooks — added after a session satisfied the letter of the commit hook by doing `git checkout -b` in the primary checkout, working there, and squash-landing — plus one git-level hook that is stronger than either but opt-in per repo:
 - `git-hygiene-edit-guard.sh` (Edit/Write/NotebookEdit): file edits inside a repo's *primary* checkout are denied on any branch; edits in a linked worktree are denied when the session's cwd is a different checkout of the same repo (orchestrator meddling). Exempt: non-repo files, `~/.claude/**`, repos with no commits.
 - `git-hygiene-guard.sh` (Bash): a **best-effort linter, not enforcement** — pattern-matches the command string and denies `git commit` on main/master in any checkout, with no exception for a manual squash-merge (the blessed landing path, `bin/land.sh`, never produces one — see below), except an empty repo's first commit; also denies branch commits made in the primary checkout.
-- `git-hygiene-dispatch-nudge.sh` (UserPromptSubmit): a NUDGE, not a block — when a prompt in a primary checkout reads as feature/design/build work, it reminds the session to scope-then-dispatch to a worker instead of implementing inline. Silent in linked worktrees, non-repos, and for plain questions.
 - `hooks/git-repo/reference-transaction` (a **git** hook, not a Claude Code hook — opt-in per repository via `install-repo.sh`, not installed by `install.sh`): structural, spelling- and tool-immune enforcement at the ref level. Full detail in `README.md`'s ["The per-repository git guard"](../README.md#the-per-repository-git-guard).
 
 ### What this does and does not enforce
@@ -181,4 +180,4 @@ herdr worktree create ──► work (Tier 1/2/3, messy commits OK)
 
 ## Encoding status
 
-Encoded as: CLAUDE.md rules (soft), two PreToolUse guards + one UserPromptSubmit dispatch-nudge + one opt-in git-level `reference-transaction` hook (see "Enforcement hooks" above), the `/land` skill backed by `bin/land.sh`, the three-tier routing model (this document, mirrored in `claude-md/git-hygiene-section.md`), and the background watcher. This playbook remains the source of truth; when doctrine changes, update it and the encodings together.
+Encoded as: CLAUDE.md rules (soft), two PreToolUse guards + one opt-in git-level `reference-transaction` hook (see "Enforcement hooks" above), the `/land` skill backed by `bin/land.sh`, the three-tier routing model (this document, mirrored in `claude-md/git-hygiene-section.md`), and the background watcher. This playbook remains the source of truth; when doctrine changes, update it and the encodings together.
