@@ -1,0 +1,208 @@
+#!/bin/bash
+# reference-transaction — a git-level guard that keeps a protected branch linear.
+#
+# Installed per-repository (see install-repo.sh), NOT into ~/.claude. Git runs it
+# inside every ref transaction, so — unlike the Claude Code PreToolUse hooks in
+# this repo — it does not care how the command was spelled or which tool issued
+# it. It sees only the exact old SHA, new SHA and ref name. Interpreter
+# indirection, `GIT_DIR=` retargeting, plumbing, `sed -i`, an MCP server, a
+# Makefile: all of it arrives here as the same three fields.
+#
+# WHAT IT ENFORCES, EXACTLY. For the protected branch (`main`/`master` by
+# default; see CONFIGURATION) an update is allowed only when the new commit has
+# exactly one parent AND that parent is the old value — a fast-forward by
+# exactly one commit. Creation from the zero SHA is allowed (fresh repo). That
+# blocks: deletion, history rewrite, backward reset, `git merge` fast-forwarding
+# a multi-commit branch, `git pull`, real merge commits, and any jump to an
+# unrelated commit via `update-ref` / `branch -f` / `commit-tree`.
+#
+# WHAT IT DOES NOT ENFORCE — read this before trusting it.
+#
+#   * NOT PROVENANCE. It cannot tell a squash landing from a plain `git commit`
+#     made directly on the protected branch: both produce exactly one new
+#     single-parent commit whose parent is the old tip. This hook enforces
+#     LINEARITY AND SINGLE-COMMIT ADVANCE, not "only landings reach main".
+#     Do not paper over that with a token, marker file or nonce written by the
+#     landing script — that is forgeable state, reproducible by anything running
+#     as the same user, and it is the pattern this project is removing.
+#   * NOT A SECURITY BOUNDARY. Anything running as your uid can `rm` this file,
+#     set `core.hooksPath` elsewhere, or pass `--no-verify`-equivalent config.
+#     The ceiling is "the same user cannot do it BY ACCIDENT", not "cannot".
+#
+# CONFIGURATION
+#   git config --add hygiene.protectedBranch <name>   # REPLACES the main/master
+#                                                     # default; repeat to add more
+#   HYGIENE_ALLOW_REF_UPDATE=1 <git command>          # documented escape hatch,
+#                                                     # one invocation only
+#
+# The escape hatch is deliberate and is not a weakness: a human legitimately
+# needs `git pull` on main after pushing from another machine, or needs to undo
+# a mistake. An undocumented mechanism people discover by deleting the hook is
+# strictly worse than a named one.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Fast path. Only `prepared` can reject; `committed`/`aborted` are notifications
+# and must always exit 0. Everything below this point runs on every single ref
+# update in the repository, from every worktree, so it does no forks at all
+# until it knows a branch ref is in play.
+# ---------------------------------------------------------------------------
+
+[ "${1:-}" = "prepared" ] || exit 0
+[ -z "${HYGIENE_ALLOW_REF_UPDATE:-}" ] || exit 0
+
+# All-zeros of any length, so this works for both sha1 and sha256 repos.
+is_zero() { case "$1" in ''|*[!0]*) return 1 ;; *) return 0 ;; esac; }
+
+# stdin is one `<old> <new> <ref>` line per ref, and a transaction routinely
+# carries many at once (a commit sends HEAD *and* refs/heads/<branch>; a
+# `git pack-refs` sends every ref in the repo). Read all of them, keep only
+# branch refs. Tags, refs/stash, refs/remotes/*, refs/notes/*, ORIG_HEAD and
+# bare HEAD are none of our business and leave here having cost nothing.
+#
+# Ignoring the bare `HEAD` line is not a hole: a commit on the protected branch
+# always reports refs/heads/<branch> in the same transaction, and HEAD is
+# per-worktree, so matching it would fire in every worktree instead.
+branch_lines=""
+while read -r old new ref; do
+  case "$ref" in
+    refs/heads/?*) branch_lines="$branch_lines$old $new $ref
+" ;;
+  esac
+done
+[ -n "$branch_lines" ] || exit 0
+
+# One fork, only now that a branch is actually being moved.
+protected=$(git config --get-all hygiene.protectedBranch 2>/dev/null || true)
+if [ -z "$protected" ]; then
+  protected="main
+master"
+fi
+
+# Normalise once into a space-delimited set. Ref names cannot contain spaces, so
+# a substring test against " a b c " is an exact membership test — and it costs
+# nothing per ref, which matters when `git pack-refs` hands us every branch in
+# the repository in a single transaction.
+protected_set=" "
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  case "$name" in refs/*) : ;; *) name="refs/heads/$name" ;; esac
+  protected_set="$protected_set$name "
+done <<EOF
+$protected
+EOF
+
+is_protected() { case "$protected_set" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+deny() {
+  local ref="$1" old="$2" new="$3" reason="$4"
+  {
+    printf '\n'
+    printf 'git hygiene: refusing to update %s\n' "$ref"
+    printf '\n'
+    printf '  %s -> %s\n' "$old" "$new"
+    printf '  %s\n' "$reason"
+    printf '\n'
+    printf '%s may only advance by exactly ONE commit whose parent is its current\n' "$ref"
+    printf 'tip — the shape a squash landing produces (bin/land.sh). Land your work\n'
+    printf 'from a branch instead of moving %s directly.\n' "$ref"
+    printf '\n'
+    printf 'If you genuinely mean to do this, say so for one command:\n'
+    printf '  HYGIENE_ALLOW_REF_UPDATE=1 <your git command>\n'
+    printf '\n'
+  } >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Deletion. `git pack-refs` — and therefore `git gc`, which calls it — reports
+# the pruning of each loose ref file as a deletion of that ref, protected branch
+# included. Denying every deletion would make `git gc` fail and the repository
+# unusable, so the two cases have to be told apart. They are distinguishable:
+#
+#   real delete  (`git branch -D`, `git update-ref -d`): old is the ZERO sha,
+#                because the delete path does not check an old value.
+#   pack-refs    prune: old is the ref's REAL sha, the loose file is still on
+#                disk at `prepared` time, and packed-refs — written and
+#                committed by the immediately preceding transaction — already
+#                holds `<old> <ref>`, so the ref survives the "deletion".
+#
+# All three conditions must hold to allow it. Verified against git 2.39 for:
+# branch -D on a loose ref, on a packed ref, `update-ref -d <ref> <sha>` on
+# both, and `update-ref -d <ref>`; every one of them is denied. On a ref backend
+# with no packed-refs file (reftable) this test simply fails closed — and
+# reftable compaction does not emit ref deletions in the first place.
+# ---------------------------------------------------------------------------
+is_packrefs_prune() {
+  local old="$1" ref="$2" common
+  if is_zero "$old"; then return 1; fi
+  common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -f "$common/$ref" ] || return 1
+  [ -f "$common/packed-refs" ] || return 1
+  grep -qxF "$old $ref" "$common/packed-refs" || return 1
+  return 0
+}
+
+evaluate() {
+  local old="$1" new="$2" ref="$3" parents=""
+
+  # A no-op update (pack-refs rewrites, some plumbing) changes nothing. The
+  # zero-vs-zero exclusion is not academic: `git branch -D` reports BOTH sides
+  # as zero, so without it a plain delete reads as a no-op and sails through.
+  if [ "$old" = "$new" ] && ! is_zero "$new"; then return 0; fi
+
+  if is_zero "$new"; then
+    if is_packrefs_prune "$old" "$ref"; then return 0; fi
+    # Nothing there to protect (a delete of a branch that does not exist).
+    if ! git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then return 0; fi
+    deny "$ref" "$old" "$new" "reason: this deletes the protected branch."
+  fi
+
+  # A ZERO OLD VALUE DOES NOT MEAN "BEING CREATED". git reports the old side as
+  # zero whenever the caller did not ask it to VERIFY an old value — which is
+  # the default for `git update-ref <ref> <sha>` and `git branch -f`. Taking it
+  # at face value is a complete bypass: `git update-ref refs/heads/main
+  # <anything>` would arrive here looking exactly like a fresh repo's first
+  # commit. So resolve the ref ourselves; at `prepared` time it still holds its
+  # pre-transaction value.
+  if is_zero "$old"; then
+    old=$(git rev-parse --verify --quiet "$ref" 2>/dev/null) || old=""
+    # Genuinely absent: a fresh repo's first commit, or a clone. Nothing to
+    # protect yet. (This is also the shape `git pack-refs` uses when it writes
+    # an already-existing ref into packed-refs — there old resolves to new, and
+    # the no-op test below lets it through.)
+    if [ -z "$old" ] || [ "$old" = "$new" ]; then return 0; fi
+  fi
+
+  # `<new> <parent>...` on one line. This is the only object query the hook
+  # makes, and only for the protected branch.
+  if ! parents=$(git rev-list -n 1 --parents "$new" -- 2>/dev/null) || [ -z "$parents" ]; then
+    deny "$ref" "$old" "$new" \
+      "reason: $new is not a readable commit, so its parentage cannot be checked."
+  fi
+
+  # shellcheck disable=SC2086  # deliberate word-split: "<new> <p1> <p2> ..."
+  set -- $parents
+  case "$#" in
+    1) deny "$ref" "$old" "$new" \
+         "reason: the new commit is a root commit (no parents) — this replaces history." ;;
+    2) if [ "$2" != "$old" ]; then
+         deny "$ref" "$old" "$new" \
+           "reason: the new commit's parent is $2, not the current tip. That is a rewrite, a reset, or a fast-forward of more than one commit (git merge of a multi-commit branch, git pull)."
+       fi ;;
+    *) deny "$ref" "$old" "$new" \
+         "reason: the new commit has $(($# - 1)) parents — it is a merge commit." ;;
+  esac
+  return 0
+}
+
+while read -r old new ref; do
+  [ -n "$ref" ] || continue
+  if is_protected "$ref"; then
+    evaluate "$old" "$new" "$ref"
+  fi
+done <<EOF
+$branch_lines
+EOF
+
+exit 0

@@ -48,7 +48,50 @@ Two gaps matter more than any single bypass, and apply to both guards:
 
 Neither guard touches your own terminal — a `git commit` or file edit you type by hand isn't in scope (see [Caveats](#caveats)).
 
-For a real security boundary, see the playbook's ["What this does and does not enforce"](docs/git-hygiene-playbook.md#what-this-does-and-does-not-enforce) for the git-level-hooks and remote-branch-protection options (not implemented in this repo).
+For a stronger floor than either — one that does not depend on which *tool* issued the command — see [The per-repository git guard](#the-per-repository-git-guard) below. For a boundary that survives an adversary with your uid, you need enforcement somewhere you are not root: see the playbook's ["What this does and does not enforce"](docs/git-hygiene-playbook.md#what-this-does-and-does-not-enforce) for the remote-branch-protection option.
+
+## The per-repository git guard
+
+`hooks/git-repo/reference-transaction` is a **git** hook, not a Claude Code hook, and it is installed **per repository** rather than into `~/.claude`. `install.sh` does not touch it; it is opt-in, one repo at a time:
+
+```bash
+./install-repo.sh /path/to/repo     # default: the current directory
+./install-repo.sh --uninstall /path/to/repo
+```
+
+Git runs it inside every ref transaction, and hands it the exact old SHA, new SHA and ref name — nothing else. That is what makes it categorically different from the commit guard above, which pattern-matches a shell command string. **This hook cannot be defeated by how the command is spelled or by which tool ran it**: `sh -c`, `\git`, plumbing (`update-ref`, `commit-tree`), `GIT_DIR=` retargeting, an MCP server's `execute_shell_command`, a Makefile, your own terminal — all arrive as the same three fields. It lives in the repo's *common* git dir, so it covers every worktree of that repo at once.
+
+### What it enforces
+
+For the protected branch only, a ref update is allowed **only** when the new commit has exactly one parent **and** that parent is the old value — a fast-forward by exactly one commit, which is the shape `bin/land.sh` produces. Creating the branch from nothing (fresh repo, clone) is allowed.
+
+Everything else is refused, verified by the test suite: deleting the branch, history rewrites, `git commit --amend`, `git reset --hard` backwards, `git merge` fast-forwarding a **multi-commit** branch, `git pull`, real merge commits (two parents), and jumps to an unrelated commit via `git update-ref` / `git branch -f`. Every other ref in the repository — feature branches, tags, `refs/stash`, remote-tracking refs, notes — passes through untouched.
+
+Protect a differently-named branch (this **replaces** the `main`/`master` default; repeat the flag to list several):
+
+```bash
+git config --add hygiene.protectedBranch trunk
+```
+
+Do something the guard refuses, deliberately, for exactly one command:
+
+```bash
+HYGIENE_ALLOW_REF_UPDATE=1 git pull
+```
+
+The escape hatch is documented on purpose. You will legitimately need it — to `git pull` on main after pushing from another machine, or to undo a mistake — and a named, greppable hatch is strictly better than one people discover by deleting the hook.
+
+### What it does **not** enforce
+
+- **Not provenance.** It cannot tell a squash landing from a plain `git commit` made directly on the protected branch: both produce exactly one new single-parent commit whose parent is the old tip. It enforces **linearity and single-commit advance**, not "only landings reach `main`". This is not fixable with a token or marker file written by the landing script — that is forgeable state, reproducible by anything running as the same user, and it would recreate the pattern this repo is removing. `run-tests.sh` asserts the permissive behaviour explicitly so nobody can quietly start claiming otherwise.
+- **Not a security boundary.** Anything running as your uid can delete the hook, point `core.hooksPath` elsewhere, or edit it. The ceiling is *"the same user cannot do it by accident"*, not *"cannot"*.
+- **It protects the ref, not your checkout.** Git finishes a merge or a `reset --hard` in the index and working tree *before* it tries to move the ref, so a refusal leaves `main` correct but the checkout mid-merge or reset — `git merge --abort` / `git reset --hard main` to recover.
+- **Deletion has one deliberate blind spot.** `git gc` and `git pack-refs` prune loose ref files, which git reports to the hook as deleting the protected branch; refusing that would make the repository impossible to garbage-collect. The hook allows a deletion only when it carries the pack-refs signature (a real old SHA, the loose file still present, and a surviving `packed-refs` entry at that same SHA). Every genuine delete path — `git branch -D`, `git update-ref -d` with or without an old value, packed or loose — is refused, and the suite tests all of them.
+- **It is local.** It governs one clone. Pushes to a shared remote are governed by that remote's own hooks or branch protection, not by this.
+
+`install-repo.sh` is idempotent, backs up whatever it replaces, refuses rather than clobbering a `reference-transaction` hook that isn't ours (`--as <name>` installs alongside it for chaining), and refuses rather than reporting a fake success when `core.hooksPath` points somewhere `.git/hooks` isn't read (`--hooks-dir <dir>` installs where git actually looks).
+
+> This repository does **not** install the guard into itself. A wrong version of it here would reject the very landings needed to fix it, so turning it on is a deliberate decision, and `run-tests.sh` asserts it is off.
 
 ## The orchestrator / worker model
 
