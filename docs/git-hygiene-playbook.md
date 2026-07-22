@@ -24,9 +24,29 @@ is the universal first step of any work.
 - `git-hygiene-dispatch-nudge.sh` (UserPromptSubmit): a NUDGE, not a block — when a prompt in a primary checkout reads as feature/design/build work, it reminds the session to scope-then-dispatch to a worker instead of implementing inline. Silent in linked worktrees, non-repos, and for plain questions.
 - Limits: Bash file writes (`sed -i`, redirects) bypass the edit guard but their commits are still caught; hooks govern Claude Code sessions only, never your own terminal.
 
-### The orchestrator model (who does the work)
+### Three tiers of change (who does the work)
 
-The session in the repo's main checkout is the **orchestrator** — it never implements. It creates the worktree workspace, launches a Claude agent *inside* it, hands over the task, and supervises. Doing the work yourself from the main-checkout session — even at the worktree's path — violates the model. (Decided 2026-07-21 after exactly that failure.)
+Rule 1 above (always worktree) is absolute — it's cheap and it's what protects main. Who *executes inside* that worktree is a separate question, and it does not get the same absolute answer.
+
+**Route on discovery and volume, not on importance or how small the diff looks.** A one-line typo fix and a security patch can both be Tier 1, if the acting session already knows the exact change to make. A large but fully-scoped mechanical rename can be Tier 2. Delegation earns its overhead on volume and repetition, not on stakes — briefing a subagent to make an edit you have already fully specified costs more than making it yourself.
+
+- **Tier 1 — self-edit in a worktree.** Use when the acting session already knows the exact change (no discovery needed). Create the worktree, move the session's own cwd into it (`EnterWorktree(path: <worktree>)`), edit and commit directly, then `ExitWorktree(action: "keep")` and land with `bin/land.sh`. No second agent, no watcher, no turn boundary. Permitted by the cwd mechanism below.
+- **Tier 2 — delegate to an in-session subagent with worktree isolation.** Use when the change needs discovery, volume, or repetition but has modest blast radius. Claude Code's Agent tool with `model: haiku|sonnet` and `isolation: "worktree"` pins the subagent's cwd inside its own worktree, so the guard permits its edits. One tool call; no watcher, no transcript review, no turn boundary.
+  **Status: unvalidated — do not treat as proven.**
+  - Untested whether `isolation: "worktree"` works in a repo with **no git remote**. Claude Code's `EnterWorktree` docs say `worktree.baseRef` defaults to `fresh`, branching from `origin/<default-branch>` — a remote-less repo has no `origin`, so this may fail or silently fall back to HEAD.
+  - `isolation: "worktree"` creates a **Claude-native worktree under `.claude/worktrees/`**, not a herdr workspace — it will not appear in `herdr worktree list`, and cleanup is `git worktree remove`, not `herdr worktree remove`.
+- **Tier 3 — dispatch a herdr pane worker.** Use when there is real blast radius, a long horizon, or parallel work to run. This is the flow detailed in "The orchestrator model" below, unchanged.
+
+**Why the worktree requirement is absolute but the dispatch requirement isn't — verified by reading `hooks/git-hygiene-edit-guard.sh`:**
+- **Lines 28-31:** if the target file is in the repo's PRIMARY checkout, the edit is denied unconditionally. No agent — main session or subagent — can edit the primary checkout. The worktree requirement is therefore non-negotiable and stays absolute for all three tiers.
+- **Lines 34-36:** for a LINKED worktree the hook reads `.cwd` from the hook payload (the *acting agent's* cwd) and allows the edit when that cwd is inside the worktree toplevel: `case $cwd in "$tl"|"$tl"/*) exit 0 ;;`
+- **Lines 38-43:** it denies only when the acting agent's cwd is a *different* checkout of the same repo ("orchestrator meddling").
+
+The guard is **cwd-based, not agent-identity-based**: any agent whose cwd sits inside the worktree may edit it directly. That's the fact that legitimizes Tiers 1 and 2 — both keep the acting agent's cwd inside the worktree throughout, so the guard never fires. Tier 3 exists for when volume, blast radius, or parallelism make dispatch worth its overhead anyway.
+
+### The orchestrator model (who does the work) — Tier 3 in detail
+
+The session in the repo's main checkout is the **orchestrator** — it never implements. It creates the worktree workspace, launches a Claude agent *inside* it, hands over the task, and supervises. Doing the work yourself from the main-checkout session — even at the worktree's path — violates the model. (Decided 2026-07-21 after exactly that failure.) Refined 2026-07-22 to separate the **worktree requirement** (integrity; cheap; non-negotiable) from the **dispatch requirement** (cost/context/parallelism; scales with the change) — see "Three tiers of change" above; this section is Tier 3's mechanics specifically.
 
 Verified dispatch sequence (requires `HERDR_ENV=1`):
 
@@ -73,23 +93,23 @@ Inside the worktree, commit as messily as you like — WIP commits, checkpoints,
 
 ## 4. Landing (the merge gate)
 
-To land a branch, in order:
+Scripted as `bin/land.sh <branch>` (see `skills/land/SKILL.md` for the refusal table) — it does, in order:
 
-1. **Rebase** on latest main — surface conflicts in the worktree, never on main.
-2. **Test** — run the suite; if the project has none, the degraded equivalent (build / lint / manual smoke), and say so in the commit message.
-3. **Self-review** the diff (use a code-review skill/tool for anything non-trivial).
-4. **Squash-merge locally** into main — one clean commit per change; message describes the change, not the journey. No PRs required for solo work; open a PR instead when you want that record.
+1. **Rebase** on latest main — surface conflicts in the worktree, never on main; the script aborts the rebase automatically on conflict rather than leaving it mid-resolution.
+2. **Test** — run the suite; if the project has none, the degraded equivalent (build / lint), and say so in the commit message.
+3. **Self-review** the diff — printed for you to read before it merges; `--dry-run` stops here, before any merge or cleanup.
+4. **Race-check** that main hasn't moved since the rebase, then **squash-merge locally** into main — one clean commit per change; message describes the change, not the journey (`-m` sets it explicitly). No PRs required for solo work; open a PR instead when you want that record.
 
 ## 5. Cleanup — immediately, not eventually
 
-The moment a branch lands (or an experiment is abandoned):
+`bin/land.sh` runs this automatically as its last step when landing. For an abandoned branch (no landing), run it yourself:
 
 ```
 herdr worktree remove --workspace <id> --force
 git branch -D <name>
 ```
 
-A worktree never outlives its merge. Cleanup is part of landing, not a separate chore — this is the direct fix for stale-worktree pileup.
+A worktree never outlives its merge or its abandonment. Cleanup is part of landing, not a separate chore — this is the direct fix for stale-worktree pileup.
 
 ## 6. Deploying
 
@@ -106,10 +126,11 @@ If a branch lives more than a day or two, rebase it on main regularly — drift 
 ## Lifecycle summary
 
 ```
-herdr worktree create ──► work (messy commits OK) ──► rebase ──► test ──► review
-        ──► squash-merge to main ──► remove worktree + delete branch ──► [deploy, when chosen]
+herdr worktree create ──► work (Tier 1/2/3, messy commits OK)
+        ──► bin/land.sh (rebase ──► test ──► review ──► squash-merge ──► cleanup)
+        ──► [deploy, when chosen]
 ```
 
 ## Encoding status
 
-Encoded as: CLAUDE.md rules (soft), two PreToolUse guards + one UserPromptSubmit dispatch-nudge (see "Enforcement hooks" above), the `/land` skill, and the background watcher. This playbook remains the source of truth; when doctrine changes, update it and the encodings together.
+Encoded as: CLAUDE.md rules (soft), two PreToolUse guards + one UserPromptSubmit dispatch-nudge (see "Enforcement hooks" above), the `/land` skill backed by `bin/land.sh`, the three-tier routing model (this document, mirrored in `claude-md/git-hygiene-section.md`), and the background watcher. This playbook remains the source of truth; when doctrine changes, update it and the encodings together.

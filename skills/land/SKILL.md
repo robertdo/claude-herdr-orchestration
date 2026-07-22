@@ -5,37 +5,41 @@ description: Use when a feature/fix/chore branch (usually in a herdr or git work
 
 # Land a branch
 
-Main is merge-only and deployable by construction. A landing is rebase → test → review → squash-merge → cleanup, always in that order. Full playbook: `~/.claude/docs/git-hygiene-playbook.md`.
+Main is merge-only and deployable by construction. Landing = rebase → test → review → squash-merge → cleanup, always in that order — the mechanics are scripted; only the judgment calls below are yours. Full playbook: `~/.claude/docs/git-hygiene-playbook.md`.
 
-## Sequence (every step, in order)
+## Run it
 
-0. **Identify** the branch, its worktree path, and the repo's main checkout. Refuse to land if the branch to land IS main, if the branch worktree is dirty (commit first — WIP commits are fine, squash erases them), or if the MAIN checkout is dirty (`git status --porcelain` in the primary checkout must be empty — stray files there would pollute the landing; surface them to the user instead).
-1. **Rebase** in the worktree: `git rebase main` (with a remote, fetch first and rebase the fresh main). Resolve conflicts here, never on main.
-2. **Test** in the worktree, after the rebase: run the project's suite (look for a test script like `run-tests.sh`, package.json scripts, a Makefile, or CLAUDE.md instructions). No suite → build/lint instead and say "no test suite" in the land commit message.
-3. **Review** `git diff main...HEAD` — check for leftover debug code, secrets, and unintended files.
-4. **Land from the main checkout:**
-   ```bash
-   git merge --squash <branch>
-   git commit -m "<feat|fix|chore>: <summary>"
-   ```
-   One clean commit; the message describes the change, not the journey. (The git-hygiene hook blocks normal commits on main but allows squash-merge commits.)
-   **Race check first:** confirm main's HEAD is still the commit you rebased onto (`git -C <main-checkout> rev-parse HEAD` vs the rebase base). If another branch landed in between, go back to step 1 — rebase and retest against the new main. Never squash-merge onto a main you didn't test against.
-5. **Clean up immediately** — cleanup is part of landing, not a later chore:
-   - herdr workspace (`HERDR_ENV=1`): `herdr worktree remove --workspace <id> --force` (id via `herdr worktree list`)
-   - plain git worktree: `git worktree remove <path>`
-   - then `git branch -D <branch>`
-6. **Report** the landing commit hash and stop. Merge = deployable; deploying is a separate deliberate step, only when explicitly requested.
+```bash
+bin/land.sh <branch>
+```
+
+Run from the repo's primary checkout (it refuses otherwise). Flags: `--dry-run` stops after the diff, before merging or cleaning up; `-m "<message>"` sets the landing commit's message.
+
+The script rebases the branch onto main inside its worktree, runs the project's tests (or build/lint if there's no test suite), prints `git diff main...HEAD`, re-checks that main hasn't moved since the rebase, squash-merges, cleans up the worktree and branch, and prints the landing commit's hash as its last line.
+
+**Your job:** read the diff it prints before trusting the merge — that judgment call isn't automatable. Then handle whatever it refuses:
+
+| Refusal | Why | Fix |
+|---|---|---|
+| branch is main | main can't land onto itself | pass the actual branch name |
+| branch worktree is dirty | uncommitted changes wouldn't be part of the squash | commit first — WIP commits are fine, squash erases them |
+| main has tracked modifications | they'd pollute the landing commit | commit or stash them on main first |
+| main has untracked files | reported, not fatal — `git merge --squash` only stages the branch's own changes | ignore, or clean up separately if they don't belong |
+| rebase conflict | must be resolved in the worktree, never on main | resolve there, then re-run `bin/land.sh <branch>` |
+| race check fails | another branch landed while this one was rebased | re-run `bin/land.sh <branch>` — it rebases fresh against the new main |
 
 ## Abandoning a branch
 
-Skip steps 1–4; run step 5 only.
+No landing needed — clean up directly:
+- herdr workspace (`HERDR_ENV=1`): `herdr worktree remove --workspace <id> --force` (id via `herdr worktree list`)
+- plain git worktree: `git worktree remove <path>`
+- then `git branch -D <branch>`
 
 ## Common mistakes
 
 | Mistake | Fix |
 |---|---|
-| Plain merge or `merge --no-ff` | Squash only — WIP commits must not reach main history |
-| Skipping the test run | Tests run after rebase, before merging — every landing |
-| Testing before rebasing | Rebase first; test what will actually land on main |
-| Leaving the worktree/branch behind | Step 5 always runs, including for abandoned branches |
+| Running `bin/land.sh` from inside the worktree | Run it from the repo's primary checkout — it refuses otherwise |
+| Skipping the diff review | Read Step 3's output (or use `--dry-run` first) before trusting the merge |
+| Treating a race-check failure as an error to work around | It means main moved — just re-run `bin/land.sh <branch>`, glancing at what landed first |
 | Deploying right after merging | Deploy only on explicit request |
