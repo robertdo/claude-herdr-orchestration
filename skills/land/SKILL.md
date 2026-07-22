@@ -5,7 +5,7 @@ description: Use when a feature/fix/chore branch (usually in a herdr or git work
 
 # Land a branch
 
-Main is merge-only and deployable by construction. Landing = rebase → test → review → squash-merge → cleanup, always in that order — the mechanics are scripted; only the judgment calls below are yours. Full playbook: `~/.claude/docs/git-hygiene-playbook.md`.
+Main is merge-only and deployable by construction. Landing = verify → build the landing commit → fast-forward → clean up. The mechanics are scripted; only the judgment calls below are yours. Full playbook: `~/.claude/docs/git-hygiene-playbook.md`.
 
 ## Run it
 
@@ -13,31 +13,45 @@ Main is merge-only and deployable by construction. Landing = rebase → test →
 bin/land.sh <branch>
 ```
 
-Run from the repo's primary checkout, on main/master (it refuses otherwise — set `LAND_MAIN_BRANCH=<branch>` if this checkout is deliberately meant to land onto something else). Flags: `--dry-run` stops before merging/cleanup, but still rebases the branch and runs its tests — it's dry for main, not for the branch worktree; `-m "<message>"` sets the landing commit's message.
+Run from the repo's primary checkout, on main/master (it refuses otherwise — set `LAND_MAIN_BRANCH=<branch>` if this checkout is deliberately meant to land onto something else).
 
-The script rebases the branch onto main inside its own worktree (pinning the tested commit's SHA), runs the project's tests (or build/lint if there's no test suite — loudly, if there's neither), prints `git diff main...HEAD`, re-checks that main hasn't moved or gotten dirty and that the branch hasn't advanced since testing, squash-merges the pinned SHA, verifies the landing commit's diff matches exactly (rolling itself back if not), cleans up the worktree and branch, and prints the landing commit's hash as its last line. If the branch has no effective changes vs main after rebase, it says so, cleans up the worktree/branch anyway, and exits without touching main.
+| Flag | Effect |
+|---|---|
+| `--dry-run` | build and print the candidate commit, then stop — main is never touched and there is nothing to clean up |
+| `--no-tests` | land with no verification; **required** if the script finds no test suite |
+| `--check '<cmd>'` | run `<cmd>` in the worktree instead of auto-detecting (env: `LAND_CHECK_CMD`) |
+| `-m '<message>'` | landing commit message (multi-line bodies are fine) |
 
-### Timeout
+It runs the project's tests, builds the landing commit as an object (`git commit-tree` over the branch's tree, parented on main's tip), prints its diff, fast-forwards main onto it, removes the worktree and branch, and prints the landing commit's SHA. **stdout is only that SHA** — progress, the diff, and test output all go to stderr.
 
-Rebase + the full test suite can take minutes. Invoke `bin/land.sh` with a generous timeout, not a short agent-harness default (e.g. a 120s Bash tool timeout). If it's killed anyway:
-- **SIGINT/SIGTERM** (what most timeouts send): the script traps these, reports what state it was in, and — for a mid-rebase kill — aborts the rebase itself so the worktree comes back clean.
-- **SIGKILL**, or any death the trap didn't survive: re-running `bin/land.sh <branch>` notices leftover state (a staged squash on main, an in-progress rebase in the worktree) in preflight and refuses with recovery instructions, rather than compounding it.
-- If a squash is left staged on main (`.git/SQUASH_MSG` present), recover with `git reset --merge` — **not** `git merge --abort`, which fails (`fatal: There is no merge to abort`) because `git merge --squash` never sets `MERGE_HEAD`.
+## Three things to know
 
-**Your job:** read the diff it prints before trusting the merge — that judgment call isn't automatable. Then handle whatever it refuses:
+**It never rebases.** If the branch doesn't already contain main, it refuses and prints the exact `git rebase` to run in the worktree. Rebasing is your preparation step, not the script's — that's what keeps conflict recovery out of the landing path entirely.
+
+**Review is retrospective.** Without `--dry-run` the diff is printed and the landing proceeds in the same run: you are reading what just landed, not approving what is about to. The script is called non-interactively by agents, so it never prompts. `--dry-run` is the real gate — it builds and prints the candidate and stops, and the candidate SHA it prints stays landable by hand (`git merge --ff-only <sha>`) for as long as main hasn't moved. If you want a gate, run `--dry-run` first.
+
+**The landing commit skips your repo's commit hooks and is usually unsigned.** `git commit-tree` does not run `pre-commit` or `commit-msg`. Content validation isn't really lost — the branch's own commits already ran `pre-commit` over this exact tree, and the landing commit's tree is that tree, byte for byte. The gap is the landing *message*: a `commit-msg` hook never sees it. Signing is honoured only when `commit.gpgsign` is set, in which case the script passes `-S`. If you depend on a `commit-msg` hook or on unconditional signing, land by hand.
+
+## Killed mid-run?
+
+Nothing to recover. Until the final fast-forward the script has created only a candidate commit object, which is unreferenced and inert — main's index and working tree are never touched. Re-run it. (Give it a generous timeout anyway; the test suite can take minutes.)
+
+## Refusals
 
 | Refusal | Why | Fix |
 |---|---|---|
+| branch doesn't contain main | it will not rebase for you | run the `git rebase` it prints, in the worktree, then re-run |
+| no test suite, and no `--check` | it will not silently land unverified code | give it `--check '<cmd>'`, or state the omission with `--no-tests` |
 | branch is main | main can't land onto itself | pass the actual branch name |
-| primary checkout isn't main/master | landing would silently go to the wrong branch | switch the primary checkout to main, or set `LAND_MAIN_BRANCH=<branch>` if that's deliberate |
-| branch worktree is dirty | uncommitted changes wouldn't be part of the squash | commit first — WIP commits are fine, squash erases them |
-| branch worktree has a rebase/merge/cherry-pick in progress | land.sh won't abort in-progress work that isn't its own | finish or abort it yourself in the worktree, then re-run |
-| main has tracked modifications | they'd pollute the landing commit | commit or stash them on main first |
-| main has untracked files | reported, not fatal — `git merge --squash` only stages the branch's own changes | ignore, or clean up separately if they don't belong |
-| main has an in-progress git operation (`SQUASH_MSG`/`MERGE_HEAD`/rebase) | leftover from an interrupted land.sh run, or an unrelated manual operation | `git reset --merge` (or finish the unrelated operation), then re-run |
-| rebase conflict | must be resolved in the worktree, never on main | resolve there, then re-run `bin/land.sh <branch>` |
-| race check fails (main moved) | another branch landed while this one was rebased | re-run `bin/land.sh <branch>` — it rebases fresh against the new main |
-| branch advanced after tests ran | the new commit(s) weren't tested | re-run `bin/land.sh <branch>` so they get tested too |
+| primary checkout isn't main/master | landing would silently go to the wrong branch | switch to main, or set `LAND_MAIN_BRANCH=<branch>` |
+| branch worktree is dirty | uncommitted changes wouldn't be in the squash | commit first — WIP commits are fine, squash erases them |
+| main has tracked modifications | they aren't the script's to clobber | commit or stash them on main first |
+| main has untracked files | reported, not fatal — they can't enter the landing commit | ignore, or clean up separately |
+| fast-forward failed | main moved, or its working tree is in the way | nothing landed; rebase the branch on the new main and re-run |
+| branch advanced during the run | the new commits weren't verified | re-run so they get tested too |
+| run from inside a worktree | it lands *onto* the primary checkout | run it from there |
+
+Cleanup is best-effort and runs *after* the landing is published: if it fails, the landing still succeeded and the script says so and prints the manual commands. It will never delete a branch that advanced past the SHA it landed.
 
 ## Abandoning a branch
 
@@ -51,6 +65,7 @@ No landing needed — clean up directly:
 | Mistake | Fix |
 |---|---|
 | Running `bin/land.sh` from inside the worktree | Run it from the repo's primary checkout — it refuses otherwise |
-| Skipping the diff review | Read Step 3's output (or use `--dry-run` first) before trusting the merge |
-| Treating a race-check failure as an error to work around | It means main moved — just re-run `bin/land.sh <branch>`, glancing at what landed first |
+| Expecting the printed diff to be a gate | It isn't. Use `--dry-run` first if you want to approve before landing |
+| Reaching for `--no-tests` when a check exists | Use `--check '<cmd>'` — `--no-tests` is for projects with genuinely nothing to run |
+| Treating a fast-forward failure as an error to work around | It means main moved — rebase in the worktree and re-run |
 | Deploying right after merging | Deploy only on explicit request |

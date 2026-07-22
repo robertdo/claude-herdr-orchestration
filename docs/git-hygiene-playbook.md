@@ -123,12 +123,16 @@ Inside the worktree, commit as messily as you like — WIP commits, checkpoints,
 
 ## 4. Landing (the merge gate)
 
-Scripted as `bin/land.sh <branch>` (see `skills/land/SKILL.md` for the refusal table) — it does, in order:
+Scripted as `bin/land.sh <branch>` (see `skills/land/SKILL.md` for the flags and the refusal table) — it does, in order:
 
-1. **Rebase** on latest main — surface conflicts in the worktree, never on main; the script aborts the rebase automatically on conflict rather than leaving it mid-resolution.
-2. **Test** — run the suite; if the project has none, the degraded equivalent (build / lint), and say so in the commit message.
-3. **Print the diff** — shown as the script runs, not as a gate: without `--dry-run` the script proceeds straight to merging in the same run, so review at this step is retrospective (you're reading what already merged, not approving what's about to). Pass `--dry-run` to actually stop here, before any merge or cleanup, if you want to review first.
-4. **Race-check** that main hasn't moved since the rebase, then **squash-merge locally** into main — one clean commit per change; message describes the change, not the journey (`-m` sets it explicitly). No PRs required for solo work; open a PR instead when you want that record.
+1. **Refuse to rebase.** The branch must *already* contain main. If it doesn't, the script stops and prints the exact `git rebase` to run inside the worktree. Rebasing is a preparation step you do, deliberately, where conflicts belong — never something the landing path does on your behalf. This is the single biggest reason the script is simple: conflict resolution, abort, and recovery are not in it at all.
+2. **Verify** — run the project's test suite (auto-detected), or an explicit `--check '<cmd>'`. If there is nothing to run, it **refuses** rather than landing unverified code; `--no-tests` is how you say the omission is deliberate, and it gets recorded in the commit message.
+3. **Build the landing commit as an object.** `git commit-tree <branch's tree> -p <main's tip>` produces the finished commit without touching main's index or working tree. Its tree *is* the tested branch tree, by construction — content on main cannot leak into it, and there is nothing to verify after the fact.
+4. **Print the diff, then fast-forward.** Review here is retrospective: without `--dry-run` the script proceeds to `git merge --ff-only` in the same run, so you're reading what just landed, not approving what's about to. `--dry-run` is the actual gate — it builds and prints the candidate and stops, and prints a SHA you can land by hand later. One clean commit per change; the message describes the change, not the journey (`-m` sets it). No PRs required for solo work; open one when you want that record.
+
+**This repo is self-verifying.** It ships its own `run-tests.sh` at the root — 146 assertions covering `bin/land.sh`'s behaviour against throwaway git repos, plus a lint sweep over every shell script here — and `run-tests.sh` is the first thing land.sh's detection ladder looks for. So landings in *this* repo really do run tests, including the landing of a change to land.sh itself. Run it directly any time: `./run-tests.sh` (~15s, no network).
+
+**Why this shape.** Nothing is mutated until the fast-forward, so the script is abortable at any point with zero cleanup: kill it and re-run, no recovery protocol, no wreckage for the next run to detect. And if main advanced while the tests ran, `--ff-only` fails on its own — the safety is git's, not a hand-written race check. The tradeoff is that `commit-tree` doesn't run the repo's `pre-commit`/`commit-msg` hooks and signs only when `commit.gpgsign` is set; see `skills/land/SKILL.md` for why the content-validation half of that is mostly moot and the message half isn't.
 
 ## 5. Cleanup — immediately, not eventually
 
@@ -151,13 +155,14 @@ Corollaries:
 
 ## 7. Long-running branches
 
-If a branch lives more than a day or two, rebase it on main regularly — drift is the tax on the worktree model, and frequent rebases keep it small. Prefer landing small slices over one giant branch.
+If a branch lives more than a day or two, rebase it on main regularly — drift is the tax on the worktree model, and frequent rebases keep it small. `bin/land.sh` refuses to land a branch that doesn't already contain main, so this stops being optional hygiene and becomes the thing you do right before landing anyway. Prefer landing small slices over one giant branch.
 
 ## Lifecycle summary
 
 ```
 herdr worktree create ──► work (Tier 1/2/3, messy commits OK)
-        ──► bin/land.sh (rebase ──► test ──► review ──► squash-merge ──► cleanup)
+        ──► [rebase on main, in the worktree, when main has moved]
+        ──► bin/land.sh (verify ──► build candidate ──► review ──► fast-forward ──► cleanup)
         ──► [deploy, when chosen]
 ```
 
