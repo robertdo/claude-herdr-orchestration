@@ -3,3 +3,6 @@
 
 # macOS
 .DS_Store
+
+# gstack skill working dir — holds a daemon token and browse logs, never commit
+.gstack/
