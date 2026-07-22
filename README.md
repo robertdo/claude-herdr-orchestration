@@ -1,6 +1,6 @@
 # claude-herdr-hygiene
 
-**Worktree-per-change git hygiene for [Claude Code](https://claude.com/claude-code), enforced by hooks and orchestrated with [herdr](https://github.com/) worktrees.**
+**Worktree-per-change git hygiene for [Claude Code](https://claude.com/claude-code), enforced by hooks and orchestrated with [herdr](https://herdr.dev/) worktrees.**
 
 Every change happens in a worktree on a branch; `main` only ever receives tested, squash-merged commits — so **main is deployable by construction, not by discipline**. Claude Code hooks enforce this physically, so a long session can't drift into committing on main or editing the primary checkout in place.
 
