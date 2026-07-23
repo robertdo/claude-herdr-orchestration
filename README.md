@@ -127,6 +127,29 @@ The escape hatch is documented on purpose. You will legitimately need it — to 
 
 > This repository does **not** install the guard into itself. A wrong version of it here would reject the very landings needed to fix it, so turning it on is a deliberate decision, and `run-tests.sh` asserts it is off.
 
+## Using an orchestrator other than Claude Code
+
+Most of this repo is built on Claude Code's hook system — but the guarantee that actually matters (that `main` can't be corrupted) was deliberately moved to the **git level**, so it holds no matter which agent drives. If Grok, Codex, or any non-Claude-Code agent is your main orchestrator, here is what survives:
+
+| Layer | Works under a non-Claude-Code orchestrator? |
+|---|---|
+| `hooks/git-repo/reference-transaction` (git-level guard) | **Yes.** Git runs it on every ref transaction; it sees only `(old SHA, new SHA, ref)`, never which tool issued the command. |
+| `bin/land.sh` | **Yes.** A plain shell script — run `bin/land.sh <branch>` directly instead of the `/land` skill. |
+| herdr dispatch / supervision | **Yes.** herdr runs any agent in a pane. |
+| `git-hygiene-guard.sh` + `git-hygiene-edit-guard.sh` (the two `PreToolUse` guards) | **No.** They parse Claude Code's hook input (`.tool_input`, `.cwd`); nothing emits that under another harness, so they never fire. |
+| The `# Git hygiene` doctrine | **Not automatically.** `install.sh` writes it to `~/.claude/CLAUDE.md`, which only Claude Code reads. Put it in the other agent's instructions file (`AGENTS.md` for Codex; check what yours reads). |
+
+**The subtlety that decides what you're actually relying on:** the git-level guard enforces **linearity, not provenance** ([as above](#what-it-does-not-enforce)) — `main` may only advance by one single-parent commit. A *direct* `git commit` on `main` is exactly that shape, so the guard permits it; under Claude Code it's the Bash linter that discourages a direct commit, and that linter is gone under another harness. So with a non-Claude-Code orchestrator:
+
+- **Still structurally guaranteed for every process:** `main` cannot be rewritten, reset, force-moved, deleted, or given a real/multi-commit merge — the history-corrupting operations stay refused.
+- **Reduced to doctrine:** "work in a worktree, don't edit the primary checkout" and "don't commit straight to `main`." Nothing structural stops these; you rely on the agent following instructions it can read.
+
+**To run a non-Claude-Code agent as orchestrator with real coverage:**
+
+1. **Install the git-level guard in the repo** — `./install-repo.sh /path/to/repo`. This is the only cross-harness structural floor; without it a non-Claude-Code orchestrator has no enforcement at all, only doctrine.
+2. **Put the doctrine in that agent's instructions file** (`AGENTS.md`, etc.) so it actually works in worktrees and lands via `bin/land.sh` — `install.sh` targets `~/.claude` only and won't do this for you.
+3. **The two `PreToolUse` guards don't port for free** — you'd need that harness to support a *blocking* pre-tool hook and the scripts rewritten to its input schema. Per this repo's own [enforcement philosophy](#what-this-does-and-does-not-enforce), those linters were never the real guarantee anyway; the git-level guard is.
+
 ## The orchestrator / worker model
 
 Routing is keyed on **discovery and volume, never diff size** — a one-line fix and a security patch can both be Tier 1 if the acting session already knows the exact change:
