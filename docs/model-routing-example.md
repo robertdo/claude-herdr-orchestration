@@ -132,31 +132,30 @@ so pin deliberately), `omp/17.0.5`, `codex-cli 0.144.5`.
 
 ## The whole policy as a decision tree
 
-```
-DIAL 1 — WHICH MODEL / TIER
- New task
-    ├─ Trivial? lookup, one-liner, Q&A turn ─────────────► Haiku 4.5 (or tier 0)
-    └─ Not trivial. What is the HARDEST requirement?
-       (size to hardest, not average — importance ≠ difficulty)
-          ├─ Genuinely hard AND ≥1 of:
-          │     • novel architecture / no prior art
-          │     • high blast radius × low reversibility
-          │     • large-context integration, MANY INTERACTING INVARIANTS
-          │     • gnarly diagnosis, cheap fixes already failed
-          │     • long-horizon plan, early wrong turn compounds
-          │                                          ─────► FABLE 5, xhigh
-          │     PRECEDENCE: this branch wins even when an off-Max
-          │     bucket would also fit. Never trade correctness for quota.
-          └─ Beneath the Fable bar — can it leave the Max pool?
-                ├─ agentic VOLUME, many tool loops ──────► Grok 4.5  (SuperGrok)
-                ├─ coding-agent suite / terminal ────────► GPT-5.6   (Plus ONLY)
-                │     └─ Plus exhausted? → Grok, or a Claude tier. NEVER metered.
-                └─ Stays on Max:
-                      ├─ mechanical / bulk / codemod / config ► Haiku 4.5
-                      ├─ well-specified, small blast radius ──► Sonnet 5, high
-                      ├─ established pattern to copy ─────────► Sonnet 5
-                      └─ established pattern, deep reasoning ─► Opus 4.8
+Dial 1 as the branching decision. **Precedence:** the Fable branch wins even when an off-Max
+bucket would also fit — never trade correctness for quota. GPT runs on ChatGPT Plus only and is
+never metered; if Plus is exhausted the task falls to Grok or a Claude tier (see the scarcity
+gradient above). The hard-tail triggers are listed in the Dial 1 section above.
 
+```mermaid
+flowchart TD
+    A["New task"] --> B{"Trivial? lookup, one-liner, Q and A turn"}
+    B -->|Yes| C["Haiku 4.5 (or tier 0)"]
+    B -->|No| D{"Genuinely hard AND hits a hard-tail trigger?"}
+    D -->|Yes| E["FABLE 5, xhigh"]
+    D -->|No| F{"Can it leave the Max pool?"}
+    F -->|"agentic volume, many tool loops"| G["Grok 4.5 (SuperGrok)"]
+    F -->|"coding-agent suite / terminal"| H["GPT-5.6 (Plus only)"]
+    F -->|stays on Max| I{"What shape?"}
+    I -->|"mechanical / bulk / codemod / config"| J["Haiku 4.5"]
+    I -->|"well-specified, small blast radius"| K["Sonnet 5, high"]
+    I -->|"established pattern to copy"| L["Sonnet 5"]
+    I -->|"established pattern, deep reasoning"| M["Opus 4.8"]
+```
+
+Dials 2 and 3, and the separate execution question, as mappings:
+
+```
 DIAL 2 — EFFORT (independent; reasoning depth, NOT importance)
    Sonnet / Opus / Fable only. Haiku has no effort setting.
    lookup/mechanical → low · well-specified → medium

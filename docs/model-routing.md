@@ -158,30 +158,27 @@ Decide harness on role:
 
 ## The framework as a decision tree
 
-The same logic, drawn so gaps and precedence are visible at a glance. Model names are
-placeholders — substitute your own ladder.
+Dial 1 is the branching decision — drawn below, so gaps and precedence are visible at a glance.
+Model names are placeholders; substitute your own ladder. The hard-tail triggers are enumerated in
+[Dial 1](#dial-1--capability-tier-which-model) above. **Precedence:** the hard-tail branch wins
+even when a cheaper or more-abundant bucket would also fit — never trade correctness for quota.
+
+```mermaid
+flowchart TD
+    A["New task"] --> B{"Trivial? lookup, one-liner, single Q and A"}
+    B -->|Yes| C["Cheapest tier"]
+    B -->|No| D{"Genuinely hard AND hits a hard-tail trigger?"}
+    D -->|Yes| E["APEX tier, max effort"]
+    D -->|No| F{"What shape, beneath the apex bar?"}
+    F -->|high mechanical volume| G["Cheap / abundant tier"]
+    F -->|established pattern to copy| H["Mid tier"]
+    F -->|"well-specified, small blast radius"| I["Mid tier, high effort"]
+    F -->|deep reasoning on a known pattern| J["Premium tier"]
+```
+
+Dials 2 and 3 aren't branches — they're mappings applied to whatever Dial 1 selects:
 
 ```
-DIAL 1 — WHICH MODEL / TIER
- New task
-    ├─ Trivial? lookup, one-liner, single Q&A ──────────────► cheapest tier
-    └─ Not trivial. What is the HARDEST requirement?
-       (size to hardest, not average — importance ≠ difficulty)
-          ├─ Genuinely hard AND ≥1 of:
-          │     • novel architecture / no prior art
-          │     • high blast radius × low reversibility
-          │     • many interacting invariants at once (size alone is NOT a trigger)
-          │     • gnarly diagnosis, cheap fixes already failed
-          │     • long-horizon plan, early wrong turn compounds
-          │                                          ─────────► APEX tier, max effort
-          │     PRECEDENCE: this branch wins even when a cheaper/abundant
-          │     bucket would also fit. Never trade correctness for quota.
-          └─ Beneath the apex bar:
-                ├─ high mechanical VOLUME ───────────────────► cheap/abundant tier
-                ├─ established pattern to copy ──────────────► mid tier
-                ├─ well-specified, small blast radius ───────► mid tier, high effort
-                └─ established pattern, deep reasoning ──────► premium tier
-
 DIAL 2 — EFFORT (independent; reasoning depth, NOT importance; where supported)
    lookup/mechanical → low · well-specified → medium
    standard/complex  → high · hardest architecture/debug → max
@@ -213,6 +210,14 @@ dispatched worker) and **which model + effort that execution uses** (this framew
 task description and no stake in doing the work itself, so it is well-placed to size both. A
 dispatched worker's model is its *ceiling*, not its floor: it too should delegate its own routine
 subtasks downward per Lever 2.
+
+```mermaid
+flowchart TD
+    O["Orchestrator scopes a unit of work"] --> T["Pillar 1 — git hygiene: WHO executes and WHERE. Tier 1 self-edit, Tier 2 isolated subagent, Tier 3 dispatched worker"]
+    O --> M["Pillar 2 — model routing: WHICH model and HOW HARD. capability tier times reasoning effort"]
+    T --> R["Two independent calls; neither determines the other"]
+    M --> R
+```
 
 Neither pillar's answer determines the other. A trivial change you already understand is Tier 1,
 but if it touches money or auth you may still hand it to a premium model; a large mechanical sweep
