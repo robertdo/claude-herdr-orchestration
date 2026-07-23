@@ -1,8 +1,14 @@
-# claude-herdr-hygiene
+# claude-herdr-orchestration
 
-**Worktree-per-change git hygiene for [Claude Code](https://claude.com/claude-code), guarded by hooks and orchestrated with [herdr](https://herdr.dev/) worktrees.**
+**Disciplined orchestration of AI coding agents — worktree-per-change git hygiene *and* a model-routing framework — for [Claude Code](https://claude.com/claude-code), guarded by hooks and orchestrated with [herdr](https://herdr.dev/).**
 
-Every change happens in a worktree on a branch, landed into `main` as a single squash-merged commit — so `main` stays a clean, linear history by construction, not by discipline. Claude Code hooks catch the common accidental slips — a direct `git commit` on main, a direct edit to the primary checkout — so a long session can't drift into them. They're guardrails against careless agents, not a security boundary against adversarial ones; see [What this does and does not enforce](#what-this-does-and-does-not-enforce).
+Running an AI agent against a real repo raises two separable questions, and this repo is two pillars, one for each.
+
+**Where does the work land?** Every change happens in a worktree on a branch, landed into `main` as a single squash-merged commit — so `main` stays a clean, linear history by construction, not by discipline. Claude Code hooks catch the common accidental slips — a direct `git commit` on main, a direct edit to the primary checkout — so a long session can't drift into them.
+
+**Which model does the work, and how hard does it think?** A [model-routing framework](docs/model-routing.md) sizes each task to the cheapest capability tier and reasoning effort that clears its bar, keeping your scarcest model in reserve for the genuinely hard tail.
+
+The two are orthogonal — hygiene decides *who executes and where*, routing decides *which model and how hard* — and the repo keeps them deliberately apart, joined only at the orchestrator that scopes each task and makes both calls. The hooks are guardrails against careless agents, not a security boundary against adversarial ones; see [What this does and does not enforce](#what-this-does-and-does-not-enforce).
 
 ---
 
@@ -140,6 +146,17 @@ This is an operating rule, not architecture — the full model (the three routin
 
 > Bootstrapping a brand-new repo is the one operation done inline (there's no repo to make a worktree from yet) — which is exactly why the commit guard exempts a repo with no commits.
 
+## Model routing — the second pillar
+
+The hygiene pillar decides *who executes the work and where.* The routing pillar decides the orthogonal thing — *which model runs a task, and how hard should it think?* — with a framework built to keep your scarcest model in reserve:
+
+- Route each task to the cheapest resource that clears its **hardest** requirement — importance ≠ difficulty. A high-stakes one-liner is still easy; a throwaway prototype of a novel algorithm is still hard.
+- **Two independent dials:** capability **tier** (which model) and reasoning **effort** (depth, *not* importance). Raise effort before tier when a task is reasoning-deep but within a cheaper model's ceiling; raise tier without effort when it's capability-hard but shallow.
+- Reserve the **apex model for the genuinely hard tail** — novel architecture, high blast radius × low reversibility, many interacting invariants at once, gnarly diagnosis after cheap fixes failed, long-horizon plans — and let a hard trigger win over any quota saving.
+- Delegate *downward* within a session: keep planning, diagnosis, and review on the driver; push boilerplate, bulk edits, and search fan-out to cheaper subagents.
+
+The full framework, model- and provider-agnostic and with a decision tree, is in **[`docs/model-routing.md`](docs/model-routing.md)** — the machinery; the models, subscriptions, and quotas you route across are yours to fill in. One author's actual filled-in policy is included as a worked **[example](docs/model-routing-example.md)**, kept separate because it dates and the framework doesn't.
+
 ## Requirements
 
 - **Claude Code** (this is built on its hook system).
@@ -149,8 +166,8 @@ This is an operating rule, not architecture — the full model (the three routin
 ## Install
 
 ```bash
-git clone https://github.com/<you>/claude-herdr-hygiene
-cd claude-herdr-hygiene
+git clone https://github.com/<you>/claude-herdr-orchestration
+cd claude-herdr-orchestration
 ./install.sh                 # installs into ~/.claude
 ```
 
@@ -190,7 +207,7 @@ If you installed before this repo dropped `git-hygiene-dispatch-nudge.sh` (a `Us
 
 - **Hooks govern Claude Code sessions only** — never your own terminal. A manual `git commit` on main from your shell is *not* blocked (by design; this constrains the agent, not you).
 - **`~/src`** in the docs is just where the author keeps repos. Nothing hardcodes it — the hooks detect the primary checkout from git itself, so enforcement works for a repo anywhere.
-- **Model routing is not shipped.** The playbook says "size the worker's model + effort to the task"; *which* model/effort is a personal policy the author keeps separately. Plug in your own.
+- **Model routing ships as a framework, not a prescription.** [`docs/model-routing.md`](docs/model-routing.md) is model- and provider-agnostic machinery; *which* models, subscriptions, and quotas you route across are yours to fill in. The author's real policy is included as one worked [example](docs/model-routing-example.md) — a snapshot that dates, not a recommendation to copy.
 
 ## License
 
